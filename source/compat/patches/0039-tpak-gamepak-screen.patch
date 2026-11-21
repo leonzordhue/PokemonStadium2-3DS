@@ -1,0 +1,110 @@
+--- BanjoRecomp3D/lib/rt64-3ds/src/platform/recomp3ds.h.antes-0039
++++ BanjoRecomp3D/lib/rt64-3ds/src/platform/recomp3ds.h
+@@ -262,6 +262,14 @@
+ // Ask the runtime to shut the game down (from the HOME prompt or a script).
+ void request_exit();
+ 
++// Open the touch-screen settings menu on a page, or close it, from any thread
++// (the main thread does it on its next update); and whether it is open.
++// For a game that holds its start on a menu page (Pokemon Stadium 2's Game Pak
++// screen, as the S1 does before its game starts).
++void settings_menu_request_open(MenuPage page);
++void settings_menu_request_close();
++bool settings_menu_is_open();
++
+ // sdmc:/3ds/<sd_dir>
+ const char* base_path();
+ 
+--- BanjoRecomp3D/lib/rt64-3ds/src/platform/settings_menu.cpp.antes-0039
++++ BanjoRecomp3D/lib/rt64-3ds/src/platform/settings_menu.cpp
+@@ -1066,6 +1066,12 @@
+ 
+ void recomp3ds::settings_menu_redraw() { g_redraw = true; }
+ 
++// -1 none, -2 close, else the page to open on (settings_menu_update carries it out).
++static volatile int g_menu_request = -1;
++void recomp3ds::settings_menu_request_open(MenuPage page) { g_menu_request = page; }
++void recomp3ds::settings_menu_request_close() { g_menu_request = -2; }
++bool recomp3ds::settings_menu_is_open() { return g_open; }
++
+ u32 recomp3ds::settings_menu_keys() {
+     return g_open ? (KEY_DUP | KEY_DDOWN | KEY_DLEFT | KEY_DRIGHT) : 0;
+ }
+@@ -1073,6 +1079,11 @@
+ // Called ~60 times a second from the main thread.
+ void recomp3ds::settings_menu_update() {
+     static u32 prev = 0;
++    if (const int req = g_menu_request; req != -1) {
++        g_menu_request = -1;
++        if (req == -2) { if (g_open) settings_menu_toggle(); }
++        else { if (!g_open) settings_menu_toggle(); set_page(req); }
++    }
+     static u64 next_repeat = 0;
+     static int ticks = 0;
+     // The game scans the pad only while it polls it (not during loads).
+--- s2-3ds/platform/3ds/main_3ds.cpp.antes-0039
++++ s2-3ds/platform/3ds/main_3ds.cpp
+@@ -204,6 +204,36 @@
+     }
+ }
+ 
++// P41: the S1 opens its Transfer Pak screen before the game (ref/s1_strings.txt:
++// "Setting up Transfer Pak", "Connected to Game Pak", "Search saves", "Start
++// game"). Here: the Game page of the settings menu (the Transfer Pak rows and
++// "Start game") opens and the game waits until Start game, A, or the menu is
++// closed (SELECT). A scripted run (AUTOTEST.TXT) starts at once.
++volatile bool g_start_game = false;
++int g_start_value = 0;
++void s2_start_row(int) {
++    static int calls = 0;
++    if (calls++ > 0) g_start_game = true;   // the first call is the settings.ini load
++}
++void s2_gamepak_screen() {
++    if (FILE* f = fopen((std::string(kSdDir) + "/AUTOTEST.TXT").c_str(), "r")) { fclose(f); return; }
++    recomp3ds::settings_menu_request_open(recomp3ds::PageGame);
++    fprintf(stderr, "[S2] P41: Game Pak screen, waiting for Start game\n");
++    bool seen_open = false;
++    u32 prev = hidKeysHeld();
++    for (int t = 0; !g_start_game; t++) {
++        svcSleepThread(16666667LL);
++        const u32 held = hidKeysHeld();
++        if (held & ~prev & KEY_A) break;
++        prev = held;
++        const bool open = recomp3ds::settings_menu_is_open();
++        if (open) seen_open = true;
++        else if (seen_open || t > 120) break;   // closed with SELECT (or never opened in 2 s)
++    }
++    recomp3ds::settings_menu_request_close();
++    fprintf(stderr, "[S2] P41: start (%s)\n", tpak::status().c_str());
++}
++
+ void s2_on_init(uint8_t* rdram, recomp_context* ctx) {
+     (void)rdram; (void)ctx;
+     pokestadium::register_runtime_trampolines();
+@@ -211,6 +241,7 @@
+     tpak::set_base_dir(kSdDir);
+     tpak::load_config();                            // transferpak.cfg: Pak 1..4 ROM + save
+     fprintf(stderr, "[S2] tpak: %s\n", tpak::status().c_str());
++    s2_gamepak_screen();
+     // Joined on exit; 16 KB: std::filesystem + ofstream + fprintf (D7 A5).
+     g_tpak_thread = threadCreate(tpak_flush_loop, nullptr, 16 * 1024, 0x18, -2, false);   // 0x3F starved behind the busy game thread: loop pc never printed
+ }
+@@ -291,14 +322,16 @@
+     desc.button_map_count = sizeof(kButtons) / sizeof(kButtons[0]);
+     desc.menu_defaults = kDefaults;
+     desc.menu_default_count = sizeof(kDefaults) / sizeof(kDefaults[0]);
+-    static recomp3ds::MenuOption tpak_rows[tpak::menu_rows];
++    static recomp3ds::MenuOption tpak_rows[tpak::menu_rows + 1];
+     static const char* const kTpakKeys[] = { "tpak_1", "tpak_2", "tpak_3", "tpak_4", "tpak_search" };
+     void (*const tpak_cb[])(int) = { s2_tpak_row<0>, s2_tpak_row<1>, s2_tpak_row<2>, s2_tpak_row<3>, s2_tpak_row<4> };
+     static_assert(sizeof(tpak_cb) / sizeof(tpak_cb[0]) == tpak::menu_rows, "one callback per tpak row");
+     for (int i = 0; i < tpak::menu_rows; i++)
+         tpak_rows[i] = { kTpakKeys[i], tpak::menu_label(i), 0, 1, &tpak::menu_value[i], tpak::menu_names(i), tpak_cb[i] };
++    static const char* const kStartNames[] = { "Press >", "Press >" };
++    tpak_rows[tpak::menu_rows] = { "tpak_start", "Start game", 0, 1, &g_start_value, kStartNames, s2_start_row };
+     desc.menu_options = tpak_rows;
+-    desc.menu_option_count = tpak::menu_rows;
++    desc.menu_option_count = tpak::menu_rows + 1;
+     desc.old3ds_frame_cap = 1;
+ #ifdef S2_NULL_RENDERER
+     desc.null_renderer = true;

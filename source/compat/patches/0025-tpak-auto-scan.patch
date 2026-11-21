@@ -1,0 +1,80 @@
+--- a/tpak/tpak_3ds.cpp
++++ b/tpak/tpak_3ds.cpp
+@@ -578,6 +578,42 @@
+     return port >= 0 && port < port_count && g_ports[port].configured;
+ }
+ 
++// D31 (nexus): no ROM in transferpak.cfg -> look where the S1 looks
++// (tpak/COMPORTAMENTO-S1.md) and connect the Pokemon ROMs found, in name
++// order, one per pak. A <rom>.sav beside the ROM is copied (never moved) to
++// gb/saves/ when that has none, so the usual VC -> gb/saves fallback finds it.
++void auto_scan(std::string (&rom)[port_count]) {
++    const fs::path dirs[] = {fs::path(g_base) / "gb", "sdmc:/3ds/PokemonStadium/gb", "sdmc:/roms/gb", "sdmc:/roms/gbc", "sdmc:/gb"};
++    std::vector<fs::path> found;
++    for (const fs::path& d : dirs) {
++        std::error_code ec;
++        std::vector<fs::path> here;
++        for (fs::directory_iterator it(d, ec), end; !ec && it != end; it.increment(ec)) {
++            std::string ext = it->path().extension().string();
++            for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
++            if (ext != ".gb" && ext != ".gbc") continue;
++            const std::vector<uint8_t> r = read_file(it->path());
++            if (r.size() < 0x150 || save_kind(r.data(), r.size()) == SaveKind::Unknown) continue;
++            here.push_back(it->path());
++        }
++        std::sort(here.begin(), here.end());
++        found.insert(found.end(), here.begin(), here.end());
++    }
++    int n = 0;
++    for (const fs::path& r : found) {
++        bool dup = false;   // same file name in two folders: keep the first
++        for (int i = 0; i < n; i++) dup |= fs::path(rom[i]).filename() == r.filename();
++        if (dup || n == port_count) continue;
++        fs::path sib = r;
++        sib.replace_extension(".sav");
++        const fs::path dst = fs::path(g_base) / "gb" / "saves" / (r.stem().string() + ".sav");
++        std::error_code ec;
++        if (fs::exists(sib, ec) && !fs::exists(dst, ec)) write_quiet(dst, read_file(sib), false);
++        rom[n++] = r.string();
++        std::fprintf(stderr, "tpak: auto-scan pak %d = %s\n", n, r.string().c_str());
++    }
++}
++
+ void load_config() {
+     const fs::path cfg = fs::path(g_base) / "transferpak.cfg";
+     std::ifstream f(cfg);
+@@ -596,6 +632,8 @@
+     }
+     std::error_code ec;
+     fs::create_directories(fs::path(g_base) / "gb" / "saves", ec);
++    if (std::all_of(std::begin(rom), std::end(rom), [](const std::string& r) { return r.empty(); }))
++        auto_scan(rom);
+     for (int i = 0; i < port_count; i++) {
+         if (rom[i].empty()) continue;
+         // No p<n>_save: the installed VC save of this game, else gb/saves/<rom>.sav (S1).
+--- a/tpak/test_tpak.cpp
++++ b/tpak/test_tpak.cpp
+@@ -189,6 +189,23 @@
+     uint8_t b[32];
+     assert(tpak::read_block(1, 0, b) == 1);
+ 
++    // D31: no transferpak.cfg -> auto-scan of <base>/gb (Pokemon ROMs only, sibling .sav copied)
++    {
++        const fs::path B = T / "scan";
++        fs::create_directories(B / "gb");
++        wr(B / "gb" / "zz-red.gb", red);
++        wr(B / "gb" / "aa-tetris.gb", make_rom("TETRIS", 0x00, 0x00, 0x8000));
++        std::vector<uint8_t> sib(0x8000, 0x5A);
++        wr(B / "gb" / "zz-red.sav", sib);
++        tpak::set_base_dir(B.string());
++        tpak::load_config();
++        assert(tpak::has_pak(0) && !tpak::has_pak(1));             // Tetris skipped
++        assert(rd(B / "gb" / "saves" / "zz-red.sav") == sib);      // copied
++        assert(fs::exists(B / "gb" / "zz-red.sav"));               // original kept
++        assert(tpak::set_cart(0, "", ""));
++        tpak::set_base_dir(T.string());
++    }
++
+     fs::remove_all(T);
+     std::puts("tpak: todos os testes passaram");
+     return 0;

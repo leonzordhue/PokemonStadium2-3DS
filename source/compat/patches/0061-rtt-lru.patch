@@ -1,0 +1,63 @@
+--- a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_dl.cpp
++++ b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_dl.cpp
+@@ -1303,6 +1303,16 @@
+     RttImage rtt_images[kMaxRtt];
+     uint32_t rtt_list[kMaxRtt] = {};    // the list (list_seq) that last drew into each image
+     int rtt_count = 0, rtt_next = 0;
++    uint32_t rtt_used[kMaxRtt] = {};    // D59: the list (list_seq) that last drew into or loaded from each image
++    // D59 (nexus): all slots taken, the image unused for longest gives its
++    // slot (was a rotation: on the console Stadium 2's 14 cup labels and two
++    // portraits filled the 16, and the battle's images rotated onto the 1P
++    // portrait's slot, which then read RDRAM: an empty 1P panel).
++    int rtt_victim() {
++        int v = 0;
++        for (int i = 1; i < kMaxRtt; i++) if (rtt_used[i] < rtt_used[v]) v = i;
++        return v;
++    }
+     int cur_rtt = -1;                   // the image the current colour image draws into, or -1
+     uint32_t list_seq = 0;              // display lists run so far
+ 
+@@ -1422,14 +1432,15 @@
+             // an 8-wide and a 256-wide image at one address, in memory that
+             // does not overlap, but would in one texture).
+             for (int i = 0; i < rtt_count; i++) {
+-                if (rtt_images[i].addr == a && rtt_images[i].width == width) { rtt_list[i] = list_seq; return i; }
++                if (rtt_images[i].addr == a && rtt_images[i].width == width) { rtt_list[i] = list_seq; rtt_used[i] = list_seq; return i; }
+             }
+-            int i = rtt_count < kMaxRtt ? rtt_count++ : (rtt_next++ % kMaxRtt);
++            int i = rtt_count < kMaxRtt ? rtt_count++ : rtt_victim();
+             rtt_images[i].addr = a;
+             rtt_images[i].width = (uint16_t)width;
+             rtt_images[i].pot_w = pot16(width);
+             rtt_images[i].pot_h = pot16((uint32_t)screen_h);
+             rtt_list[i] = list_seq;
++            rtt_used[i] = list_seq;
+             return i;
+         }
+         // Known once two framebuffers have been presented (a double-buffered
+@@ -1442,14 +1453,16 @@
+                     rtt_images[i].width = (uint16_t)width;
+                     rtt_images[i].pot_w = pot16(width);
+                 }
++                rtt_used[i] = list_seq;
+                 return i;
+             }
+         }
+-        int i = rtt_count < kMaxRtt ? rtt_count++ : (rtt_next++ % kMaxRtt);
++        int i = rtt_count < kMaxRtt ? rtt_count++ : rtt_victim();
+         rtt_images[i].addr = a;
+         rtt_images[i].width = (uint16_t)width;
+         rtt_images[i].pot_w = pot16(width);
+         rtt_images[i].pot_h = pot16((uint32_t)screen_h);
++        rtt_used[i] = list_seq;
+         return i;
+     }
+     static uint16_t pot16(uint32_t v) { uint32_t p = 8; while (p < v && p < 1024) p <<= 1; return (uint16_t)p; }
+@@ -1928,6 +1941,7 @@
+                     d.rtt = (int8_t)i;   // D36: the nearest image below the load (images 0x880 apart overlap in 512 rows)
+                 }
+             }
++            if (d.rtt >= 0) rtt_used[d.rtt] = list_seq;   // D59
+         }
+         d.tlut_mode = (othermode_h >> 14) & 3;
+         // With the TLUT on, the RDP looks every 4- and 8-bit texel up in the

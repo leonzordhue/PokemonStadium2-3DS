@@ -1,0 +1,52 @@
+diff -ruN a/lib/N64ModernRuntime/librecomp/include/librecomp/rsp.hpp b/lib/N64ModernRuntime/librecomp/include/librecomp/rsp.hpp
+--- a/lib/N64ModernRuntime/librecomp/include/librecomp/rsp.hpp
++++ b/lib/N64ModernRuntime/librecomp/include/librecomp/rsp.hpp
+@@ -179,6 +179,9 @@
+     uint32_t cur_dmem = dmem_addr & 0x0FF8u;
+     uint32_t cur_dram = dram_addr & 0xFFFFF8u;
+     for (uint32_t block = 0; block <= count; block++) {
++        if (cur_dram <= 0x11E847u && cur_dram + block_len > 0x11E844u)   // D27b (nexus): diagnosis only
++            fprintf(stderr, "[S2] D27 rsp-dma write dmem %03X dram %06X len_reg %08X block %u\n",
++                    (unsigned)cur_dmem, (unsigned)cur_dram, (unsigned)wr_len, (unsigned)block);
+         for (uint32_t i = 0; i < block_len; i++) {
+             MEM_B(0, (int64_t)(int32_t)(cur_dram + i + 0x80000000)) = RSP_MEM_B(i, cur_dmem);
+         }
+diff -ruN a/platform/3ds/main_3ds.cpp b/platform/3ds/main_3ds.cpp
+--- a/platform/3ds/main_3ds.cpp
++++ b/platform/3ds/main_3ds.cpp
+@@ -156,6 +156,27 @@
+ // D27 (nexus): the game thread sat in func_80013B54 (loop 0x80013B74..0x80013C38)
+ // at the Rental -> battle load. Print the table it walks: D_8011BE90 +0x29AC ptr,
+ // +0x29B0 total, +0x29B4 count, +0x2BBE/F next slots. A huge count = corrupted.
++// D27b (nexus): who turns the count at 0x8011E844 into 0xFFFFxxxx. Polls the word
++// every ~1 ms and prints each change with the game's last loop pc; the RSP DMA
++// side prints in rsp.hpp (S2 D27 rsp-dma). shortcut: diagnosis only, remove with the fix.
++volatile bool g_d27_run = true;
++void s2_d27_watch(void*) {
++    uint32_t last = 0, prints = 0;
++    while (g_d27_run && prints < 48) {
++        if (g_s2_rdram) {
++            const uint32_t v = *reinterpret_cast<volatile uint32_t*>(g_s2_rdram + 0x11E844u);
++            if (v != last) {
++                fprintf(stderr, "[S2] D27 watch 8011E844 %08lX -> %08lX loop pc %08lX t %llu ms\n",
++                        (unsigned long)last, (unsigned long)v, (unsigned long)s2_last_loop_pc,
++                        (unsigned long long)(svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000)));
++                last = v;
++                prints++;
++            }
++        }
++        svcSleepThread(1000000LL);
++    }
++}
++
+ void s2_dump_80013B54() {
+     if (!g_s2_rdram) return;
+     auto w = [](uint32_t va) { return *reinterpret_cast<uint32_t*>(g_s2_rdram + (va - 0x80000000u)); };
+@@ -183,6 +204,7 @@
+ void s2_on_init(uint8_t* rdram, recomp_context* ctx) {
+     (void)ctx;
+     g_s2_rdram = rdram;
++    threadCreate(s2_d27_watch, nullptr, 8 * 1024, 0x18, -2, true);   // D27b
+     pokestadium::register_runtime_trampolines();
+     recomp3ds::input_set_cstick_buttons(false);    // the C-Stick is the D-pad (kButtons)
+     tpak::set_base_dir(kSdDir);

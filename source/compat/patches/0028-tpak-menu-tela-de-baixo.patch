@@ -1,0 +1,146 @@
+--- a/tpak/tpak_3ds.h
++++ b/tpak/tpak_3ds.h
+@@ -47,6 +47,25 @@
+ // Last user-facing message (S1 wording, English), e.g. "Cartridge connected".
+ const std::string& status();
+ 
++// Unplugs every pak (saves flushed), then load_config() again: picks up an
++// edited transferpak.cfg, a newly installed VC save and (patch 0025) the scan.
++void search_saves();
++
++// Touch-screen menu rows (S1: "Transfer Pak n", "Tap again to disconnect",
++// "Search saves"); main_3ds.cpp makes a recomp3ds::MenuOption of each, with
++// value = &menu_value[row], 2 names, on_change calling menu_changed(row, v).
++// Pak row (0..port_count-1): 0 shows "<ROM>/<save>" or "No cartridge"; a
++// step onto 1 shows "Again: unplug", the next step unplugs. Row port_count:
++// "Search saves", any step searches. The first call per row (the one after
++// settings.ini loads) does nothing.
++constexpr int menu_rows = port_count + 1;
++extern int menu_value[menu_rows];
++const char* menu_label(int row);
++const char* const* menu_names(int row);
++void menu_changed(int row, int value);
++// "<ROM stem>/<save stem or VC>" in 23 characters (the menu's value column).
++std::string pak_text(const std::string& rom, const std::string& save, bool vc);
++
+ // Exposed for the host test.
+ enum class SaveKind { Unknown, Gen1, Gen2GS, Gen2Crystal };
+ SaveKind save_kind(const uint8_t* rom, size_t rom_size);
+--- a/tpak/tpak_3ds.cpp
++++ b/tpak/tpak_3ds.cpp
+@@ -427,6 +427,18 @@
+     Lock& l_;
+ };
+ 
++// The menu's pak lines (menu_names): written under g_mutex, read unlocked by
++// the menu when it draws. shortcut: a line torn by a mount mid-draw is fixed
++// on the next redraw; copy under the lock if it ever shows.
++char g_line[port_count][24] = {"No cartridge", "No cartridge", "No cartridge", "No cartridge"};
++bool g_armed[port_count], g_menu_seen[menu_rows];
++void refresh_line(int port) {
++    const Port& p = g_ports[port];
++    const std::string t = p.configured ? pak_text(p.cart.rom_path.stem().string(), p.cart.save_path.stem().string(), p.cart.vc_id != 0)
++                                       : "No cartridge";
++    std::snprintf(g_line[port], sizeof g_line[port], "%s", t.c_str());
++}
++
+ // One save write, SD first, then the VC title (S1: "save written to SD ... and VC").
+ struct Job {
+     fs::path path;
+@@ -529,6 +541,7 @@
+     if (port < 0 || port >= port_count) return false;
+     const std::string rom = resolve(rom_in), save = resolve(save_in);
+     Guard lock(g_mutex);
++    struct Refresh { int p; ~Refresh() { refresh_line(p); } } refresh{port};   // every exit, lock still held
+     // Refuse before touching this port: a refusal must not unmount its cart (D7 A1).
+     // ponytail: two ports on the same VC title are not detected; add when the menu allows it.
+     if (!rom.empty() && !save.empty() && save.rfind("vc", 0) != 0)
+@@ -604,6 +617,49 @@
+     }
+ }
+ 
++void search_saves() {
++    for (int i = 0; i < port_count; i++) set_cart(i, "", "");
++    load_config();
++}
++
++int menu_value[menu_rows];
++
++const char* menu_label(int row) {
++    static const char* const labels[] = {"Transfer Pak 1", "Transfer Pak 2", "Transfer Pak 3", "Transfer Pak 4", "Search saves"};
++    static_assert(sizeof labels / sizeof labels[0] == menu_rows, "one label per row");
++    return row >= 0 && row < menu_rows ? labels[row] : "";
++}
++
++const char* const* menu_names(int row) {
++    static const char* names[menu_rows][2];
++    for (int i = 0; i < port_count; i++) { names[i][0] = g_line[i]; names[i][1] = "Again: unplug"; }
++    names[port_count][0] = names[port_count][1] = "Press >";
++    return names[row >= 0 && row < menu_rows ? row : 0];
++}
++
++void menu_changed(int row, int value) {
++    if (row < 0 || row >= menu_rows) return;
++    const bool first = !g_menu_seen[row];
++    g_menu_seen[row] = true;
++    menu_value[row] = 0;
++    if (first) return;   // the call after settings.ini loads: an "armed" saved there starts disarmed
++    if (row == port_count) {
++        search_saves();
++        for (bool& a : g_armed) a = false;
++        for (int i = 0; i < port_count; i++) menu_value[i] = 0;
++        return;
++    }
++    if (value == 1 && !g_armed[row] && has_pak(row)) { g_armed[row] = true; menu_value[row] = 1; return; }
++    if (g_armed[row]) set_cart(row, "", "");   // "Tap again to disconnect"
++    g_armed[row] = false;
++}
++
++std::string pak_text(const std::string& rom, const std::string& save, bool vc) {
++    if (rom.empty()) return "No cartridge";
++    const std::string s = (vc ? std::string("VC") : save.empty() ? std::string("no save") : save).substr(0, 10);
++    return rom.substr(0, 22 - s.size()) + "/" + s;
++}
++
+ int read_block(int port, uint16_t block_address, uint8_t* out) {
+     Guard lock(g_mutex);
+     if (port < 0 || port >= port_count || !g_ports[port].configured) return err_no_pak;
+--- a/platform/3ds/main_3ds.cpp
++++ b/platform/3ds/main_3ds.cpp
+@@ -33,6 +33,7 @@
+     void register_overlays();                     // src/main/register_overlays.cpp
+     void register_runtime_trampolines();
+ }
++namespace recomp3ds { void settings_menu_redraw(); }   // rt64-3ds recomp3ds_internal.h: sets a flag only
+ 
+ namespace {
+ 
+@@ -61,6 +62,13 @@
+     { "cstick_deadzone", 20 },          // percent
+ };
+ 
++// The Transfer Pak rows of the S1's touch screen (tpak_3ds.h menu_*), on the
++// Game page. A search changes the other rows too: redraw the page.
++template <int Row> void s2_tpak_row(int v) {
++    tpak::menu_changed(Row, v);
++    recomp3ds::settings_menu_redraw();
++}
++
+ // The desktop's dispatch (main.cpp get_rsp_microcode). The desktop tells the
+ // GB Tower tasks by their boot code's size and first two words; the 3DS
+ // callback gets no rdram, and the boot sizes alone (0xA40, 0x9E4) differ
+@@ -260,6 +268,14 @@
+     desc.button_map_count = sizeof(kButtons) / sizeof(kButtons[0]);
+     desc.menu_defaults = kDefaults;
+     desc.menu_default_count = sizeof(kDefaults) / sizeof(kDefaults[0]);
++    static recomp3ds::MenuOption tpak_rows[tpak::menu_rows];
++    static const char* const kTpakKeys[] = { "tpak_1", "tpak_2", "tpak_3", "tpak_4", "tpak_search" };
++    void (*const tpak_cb[])(int) = { s2_tpak_row<0>, s2_tpak_row<1>, s2_tpak_row<2>, s2_tpak_row<3>, s2_tpak_row<4> };
++    static_assert(sizeof(tpak_cb) / sizeof(tpak_cb[0]) == tpak::menu_rows, "one callback per tpak row");
++    for (int i = 0; i < tpak::menu_rows; i++)
++        tpak_rows[i] = { kTpakKeys[i], tpak::menu_label(i), 0, 1, &tpak::menu_value[i], tpak::menu_names(i), tpak_cb[i] };
++    desc.menu_options = tpak_rows;
++    desc.menu_option_count = tpak::menu_rows;
+     desc.old3ds_frame_cap = 1;
+ #ifdef S2_NULL_RENDERER
+     desc.null_renderer = true;

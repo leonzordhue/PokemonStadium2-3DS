@@ -1,0 +1,31 @@
+--- a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_dl.cpp
++++ b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_dl.cpp
+@@ -1908,14 +1908,24 @@
+         // With sample_drawn_frame a block load of whole rows of an image
+         // reads it too (the rims load their strips with LOADBLOCK), but only
+         // an image drawn by this list: the memory is the game's to reuse.
+-        if ((rtt_enabled || frame_copy) && !d.snapshot && !d.frame && (!best->block || frame_copy) && tl.siz == 2) {
++        // D36: with render_to_texture a block load reads it as well (Pokemon
++        // Stadium 2's 32-wide battle portraits): before, it read RDRAM, which
++        // the GPU never writes, and drew noise.
++        if ((rtt_enabled || frame_copy) && !d.snapshot && !d.frame && tl.siz == 2) {
+             const uint32_t row = best->block ? pitch : best->pitch;
+             for (int i = 0; i < rtt_count; i++) {
+                 const RttImage& img = rtt_images[i];
++                static int d36_logged = 0;   // D36 diag: loads inside an off-screen image
++                if (d36_logged < 16 && d.addr >= img.addr && d.addr < img.addr + (uint32_t)img.width * 2 * img.pot_h) {
++                    d36_logged++;
++                    fprintf(stderr, "rt64-3ds: D36 load %06x in rtt %d (img %06x w%u): block %d row %u fmt %u siz %u tile %dx%d\n",
++                            d.addr & 0xFFFFFF, i, img.addr & 0xFFFFFF, (unsigned)img.width, best->block ? 1 : 0, row,
++                            (unsigned)tl.fmt, (unsigned)tl.siz, w, h);
++                }
+                 if (!rtt_enabled && rtt_list[i] != list_seq) continue;
+-                if (d.addr >= img.addr && d.addr < img.addr + (uint32_t)img.width * 2 * img.pot_h && row == (uint32_t)img.width * 2) {
+-                    d.rtt = (int8_t)i;
+-                    break;
++                if (d.addr >= img.addr && d.addr < img.addr + (uint32_t)img.width * 2 * img.pot_h && row == (uint32_t)img.width * 2 &&
++                    (d.rtt < 0 || img.addr > rtt_images[d.rtt].addr)) {
++                    d.rtt = (int8_t)i;   // D36: the nearest image below the load (images 0x880 apart overlap in 512 rows)
+                 }
+             }
+         }

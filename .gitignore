@@ -1,0 +1,21 @@
+# ROMs e saves: nunca no repositório
+*.z64
+*.n64
+*.v64
+*.gb
+*.gbc
+*.sav
+*.srm
+*.fla
+baserom*
+# Código gerado a partir da ROM
+generated/
+rsp-up/
+# Builds
+build*/
+*.3dsx
+*.cia
+*.elf
+*.smdh
+*.o
+*.a

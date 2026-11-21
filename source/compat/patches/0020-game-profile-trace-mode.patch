@@ -1,0 +1,11 @@
+--- a/game.toml
++++ b/game.toml
+@@ -6,6 +6,8 @@
+ rom_file_path = "baserom.z64"
+ elf_path = "disasm/build/pokestadiumgs-us.elf"
+ output_func_path = "generated"
++# Nexus D25: TRACE_ENTRY/TRACE_RETURN in every function (s2-3ds compat/trace.h; empty unless S2_GAME_PROFILE).
++trace_mode = true
+ relocatable_sections_path = "fragments_relocatable.txt"
+ bss_section_suffix = "_bss"
+ single_file_output = false

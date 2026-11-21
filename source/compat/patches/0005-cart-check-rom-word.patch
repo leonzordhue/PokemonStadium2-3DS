@@ -1,0 +1,56 @@
+--- a/generated/funcs_94.c	2026-11-19 17:11:43.114016211 -0400
++++ b/generated/funcs_94.c	2026-11-19 17:11:43.336847809 -0400
+@@ -13277,7 +13277,10 @@
+     // 0x80064C4C: nop
+ 
+     // 0x80064C50: lw          $t0, 0xE38($t9)
+-    ctx->r8 = MEM_W(ctx->r25, 0XE38);
++    // s2-3ds: copy protection (func_80064C20) le o cartucho direto em 0xB0000E38. Com RECOMP_MEM_MASK de
++    // 16 MB isso cai em rdram[0xE38] (lixo), a checagem falha e o Game_Thread gira sem bloquear.
++    // Word real da ROM (baserom.z64 @0xE38):
++    ctx->r8 = (int32_t)0x1060828Au;
+     // 0x80064C54: ori         $at, $zero, 0x828A
+     ctx->r1 = 0 | 0X828A;
+     // 0x80064C58: addiu       $t2, $zero, -0x10
+--- a/generated/funcs_87.c	2026-11-19 17:11:43.117973011 -0400
++++ b/generated/funcs_87.c	2026-11-19 17:11:43.344847809 -0400
+@@ -20084,7 +20084,10 @@
+     // 0x8006977C: nop
+ 
+     // 0x80069780: lw          $t0, 0x504($t9)
+-    ctx->r8 = MEM_W(ctx->r25, 0X504);
++    // s2-3ds: copy protection (func_80069750) le o cartucho direto em 0xB0000504. Com RECOMP_MEM_MASK de
++    // 16 MB isso cai em rdram[0x504] (lixo), a checagem falha e o Game_Thread gira sem bloquear.
++    // Word real da ROM (baserom.z64 @0x504):
++    ctx->r8 = (int32_t)0x3C01A460u;
+     // 0x80069784: ori         $at, $zero, 0xA460
+     ctx->r1 = 0 | 0XA460;
+     // 0x80069788: addiu       $t2, $zero, -0x20
+--- a/generated/funcs_163.c	2026-11-19 17:11:43.121892411 -0400
++++ b/generated/funcs_163.c	2026-11-19 17:11:43.351164809 -0400
+@@ -2762,7 +2762,10 @@
+     // 0x826043BC: nop
+ 
+     // 0x826043C0: lw          $t0, 0x800($t9)
+-    ctx->r8 = MEM_W(ctx->r25, 0X800);
++    // s2-3ds: copy protection (func_82604390) le o cartucho direto em 0xB0000800. Com RECOMP_MEM_MASK de
++    // 16 MB isso cai em rdram[0x800] (lixo), a checagem falha e o Game_Thread gira sem bloquear.
++    // Word real da ROM (baserom.z64 @0x800):
++    ctx->r8 = (int32_t)0x24050001u;
+     // 0x826043C4: addiu       $at, $zero, 0x1
+     ctx->r1 = ADD32(0, 0X1);
+     // 0x826043C8: addiu       $t2, $zero, -0x80
+--- a/generated/funcs_186.c	2026-11-19 17:11:43.124847811 -0400
++++ b/generated/funcs_186.c	2026-11-19 17:11:43.352847809 -0400
+@@ -18401,7 +18401,10 @@
+     // 0x82700DFC: nop
+ 
+     // 0x82700E00: lw          $t0, 0xD10($t9)
+-    ctx->r8 = MEM_W(ctx->r25, 0XD10);
++    // s2-3ds: copy protection (func_82700DD0) le o cartucho direto em 0xB0000D10. Com RECOMP_MEM_MASK de
++    // 16 MB isso cai em rdram[0xD10] (lixo), a checagem falha e o Game_Thread gira sem bloquear.
++    // Word real da ROM (baserom.z64 @0xD10):
++    ctx->r8 = (int32_t)0x00800400u;
+     // 0x82700E04: addiu       $at, $zero, 0x400
+     ctx->r1 = ADD32(0, 0X400);
+     // 0x82700E08: addiu       $t2, $zero, -0x40

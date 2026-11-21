@@ -1,0 +1,12 @@
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -642,6 +642,9 @@
+     // the RSP busy for most of every frame and held its audio tasks until then. The message is queued like any external
+     // one and reaches the scheduler at its next receive, after it has noted the task as started.
+     if (task->t.type == M_GFXTASK) {
++        // s2-3ds D15/D16: does the game stop sending lists after frame 216, or does rt64-3ds stop presenting them?
++        static uint32_t s2_gfx_n = 0;
++        if (++s2_gfx_n <= 3 || s2_gfx_n % 64 == 0) fprintf(stderr, "[S2] gfx task #%lu data_ptr %08lX size %lu\n", (unsigned long)s2_gfx_n, (unsigned long)task->t.data_ptr, (unsigned long)task->t.data_size);
+         events_context.action_queue.enqueue(SpTaskAction{ *task, std::chrono::high_resolution_clock::now() });
+         sp_complete();
+         return;

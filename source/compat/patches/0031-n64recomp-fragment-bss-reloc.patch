@@ -1,0 +1,21 @@
+--- a/src/elf.cpp
++++ b/src/elf.cpp
+@@ -138,6 +138,18 @@
+                 return false;
+             }
+         }
++        else if (rel_symbol_section_index == ELFIO::SHN_ABS && section_out.relocatable &&
++                 (rel_type == (uint32_t)N64Recomp::RelocType::R_MIPS_HI16 || rel_type == (uint32_t)N64Recomp::RelocType::R_MIPS_LO16) &&
++                 (uint32_t)rel_symbol_value - section_out.ram_addr < 0x100000u) {
++            // s2-3ds (Nexus D27): splat leaves the fragments' bss_size at 0, so a symbol in a
++            // fragment's real BSS (past the section's size) is an ABS one from undefined_syms_auto.ld.
++            // Emitted absolute, it pointed at the link address while the code next to it was
++            // relocated (func_826040D8: an endless loop writing -1 through RDRAM). A HI16/LO16 to
++            // the fragment's own 1 MB window is relative to the fragment.
++            reloc_out.reference_symbol = false;
++            reloc_out.target_section = section_index;
++            rel_section_vram = section_out.ram_addr;
++        }
+         else if (rel_symbol_section_index == ELFIO::SHN_ABS) {
+             reloc_out.reference_symbol = false;
+             reloc_out.target_section = N64Recomp::SectionAbsolute;

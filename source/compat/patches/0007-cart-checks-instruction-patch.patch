@@ -1,0 +1,31 @@
+--- a/game.toml
++++ b/game.toml
+@@ -139,6 +139,28 @@
+ [patches]
+ ignored = ["osSetTime"]
+ 
++# P15 (Nexus): the 3 copy-protection checks besides Game_DoCopyProtection
++# (func_80064C20, already wrapped in main_3ds.cpp) read a cart word through
++# kseg1 (0xB0000xxx). The 3DS has no ROM mirror there (RDRAM mask 16 MB), so
++# the read hits RDRAM junk and the check stores an error code (-0x20/-0x80/
++# -0x40) in place of the caller's state. Turn the `beq t1, at` at func+0x40
++# into an unconditional `b` to the shared exit (func+0x4C): same result as the
++# real US cart, whose words pass (0x3C01A460, 0x24050001, 0x00800400).
++[[patches.instruction]]
++func = "func_80069750"
++vram = 0x80069790
++value = 0x10000002
++
++[[patches.instruction]]
++func = "func_82604390"
++vram = 0x826043D0
++value = 0x10000002
++
++[[patches.instruction]]
++func = "func_82700DD0"
++vram = 0x82700E10
++value = 0x10000002
++
+ # Stadium 2 writes AI DRAM/LEN directly instead of calling osAiSetNextBuffer.
+ [[patches.hook]]
+ func = "func_800195C0"

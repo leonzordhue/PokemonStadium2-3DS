@@ -1,0 +1,40 @@
+diff -ruN a/BanjoRecomp3D/lib/rt64-3ds/src/platform/recomp3ds.h b/BanjoRecomp3D/lib/rt64-3ds/src/platform/recomp3ds.h
+--- a/BanjoRecomp3D/lib/rt64-3ds/src/platform/recomp3ds.h	2026-11-20 15:18:03.560604184 -0400
++++ b/BanjoRecomp3D/lib/rt64-3ds/src/platform/recomp3ds.h	2026-11-20 15:18:03.601396584 -0400
+@@ -161,6 +161,10 @@
+     // wants core 0: Goemon's renderer (24.4 fps at the Old clock against 17.5
+     // the other way round), Banjo's game (its core full at 13-20 fps).
+     bool two_cores_game_on_core0 = false;
++    // D44 (nexus): on a New 3DS with three cores, the RSP task thread (the
++    // audio microcode) on core 2 with the renderer instead of on core 1,
++    // whose share is APT's 80%. For a game whose audio fills core 1.
++    bool sp_task_on_core2 = false;
+     // With two cores and the game on core 0, for a game that waits on
+     // "parsed" every frame (Banjo's game_draw): each display list is read on
+     // core 0, idle while the game waits for exactly that, and drawn on core 1
+diff -ruN a/BanjoRecomp3D/lib/rt64-3ds/src/platform/recomp3ds_run.cpp b/BanjoRecomp3D/lib/rt64-3ds/src/platform/recomp3ds_run.cpp
+--- a/BanjoRecomp3D/lib/rt64-3ds/src/platform/recomp3ds_run.cpp	2026-11-20 15:18:03.571855984 -0400
++++ b/BanjoRecomp3D/lib/rt64-3ds/src/platform/recomp3ds_run.cpp	2026-11-20 15:18:03.601789084 -0400
+@@ -1429,7 +1429,7 @@
+                 g_core1_granted = true;
+                 g_core1_limit = limit;
+                 g_watch_cores |= 0x2;
+-                if (core2) g_sp_core = 1;               // the audio task beside the renderer's core
++                if (core2) g_sp_core = desc.sp_task_on_core2 ? 2 : 1;   // the audio task beside the renderer's core (D44: or with it)
+                 else if (game_on_0) g_gfx_core = g_sp_core = 1;   // two cores: the rest on core 1
+                 else g_game_core = 1;                   // two cores: the game on core 1
+             }
+diff -ruN a/s2-3ds/platform/3ds/main_3ds.cpp b/s2-3ds/platform/3ds/main_3ds.cpp
+--- a/s2-3ds/platform/3ds/main_3ds.cpp	2026-11-20 15:18:03.583274784 -0400
++++ b/s2-3ds/platform/3ds/main_3ds.cpp	2026-11-20 15:18:03.602300884 -0400
+@@ -287,6 +287,10 @@
+     // holds them for that (Goemon does the same). Without it the scheduler
+     // keeps the graphics task back behind every audio task: ~4 VIs a frame.
+     desc.audio_async = true;
++    // D44 (nexus): the audio task filled core 1 (APT's 80%: 984-1014 ms/s in
++    // the battle, the fps dropping with it) while core 2 ran the renderer at
++    // 26-35%. Core 2 is 25% faster than core 1's share.
++    desc.sp_task_on_core2 = true;
+     desc.button_map = kButtons;
+     desc.button_map_count = sizeof(kButtons) / sizeof(kButtons[0]);
+     desc.menu_defaults = kDefaults;

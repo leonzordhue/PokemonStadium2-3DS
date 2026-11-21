@@ -1,0 +1,316 @@
+--- s2-3ds/rsp-up/aspMain_ps2.cpp.antes-0035
++++ s2-3ds/rsp-up/aspMain_ps2.cpp
+@@ -39,6 +39,28 @@
+ // P27c [Proton]: FILTER count lives across commands, like filter_count in mupen's alist_nead.
+ static uint32_t s2_filter_count = 0;
+ 
++#ifdef S2_ASP_NATIVE
++// P35b [Proton]: the RESAMPLE constants the native loop assumes (DMEM 0x60-0xCF as this ucode ships them).
++static bool s2_resample_consts_ok(const RSP& rsp) {
++    for (int i = 0; i < 8; i++) {
++        if (rsp.vpu.r[31].s16(i) != 1 || rsp.vpu.r[25].s16(i) != 2 * (i + 1)) return false;
++        for (int k = 0; k < 4; k++) if (rsp.vpu.r[29 - k].s16(i) != ((i & 3) == k ? 1 : 0)) return false;
++    }
++    return rsp.vpu.r[30].s16(0) == 0 && rsp.vpu.r[30].s16(2) == 2 && rsp.vpu.r[30].s16(4) == 8;
++}
++#endif
++#ifdef S2_ASP_NATIVE
++// P35b [Proton]: the ADPCM 4-bit masks/scales the native loop assumes (DMEM 0x00 and 0x40-0x4F).
++static bool s2_adpcm_consts_ok(const RSP& rsp) {
++    static const uint16_t mask[4] = { 0xF000, 0x0F00, 0x00F0, 0x000F }, mul[4] = { 0x0001, 0x0010, 0x0100, 0x1000 };
++    for (int i = 0; i < 8; i++) {
++        if (rsp.vpu.r[25].u16(i) != (i < 4 ? mask[i] : 0) || rsp.vpu.r[24].u16(i) != (i < 4 ? 0 : mask[i - 4])) return false;
++        if (rsp.vpu.r[23].u16(i) != mul[i & 3]) return false;
++    }
++    return rsp.vpu.r[31].u16(4) == 0x20 && rsp.vpu.r[31].u16(5) == 0x800;
++}
++#endif
++
+ #ifdef S2_ASP_PROF
+ // s2-3ds P35: time per audio command (ticks from one command fetch to the next), printed once a second.
+ #include <3ds.h>
+@@ -734,6 +756,63 @@
+     r13 = RSP_ADD32(r13, -0X2);
+     // lrv         $v13[0], 0x20($13)
+     rsp.LRV<0>(rsp.vpu.r[13], r13, 0X2);
++#ifdef S2_ASP_NATIVE
++    // P35b [Proton]: ADPCM (0x01) 4-bit decode loop L_13C0..L_1504 in scalar C++, bit-exact with the
++    // vector code below (checked against it on the P35 captures). Per 9-byte frame: 16 nibbles scaled
++    // by the header's shift, then the 2x8 predictor book; the accumulator keeps 32 bits of each sum and
++    // the sample is that >> 11, saturated (VSAR + VMUDN/VMADH by 0x20). 2-bit frames keep the vector loop.
++    if (r8 == 0 && r9 == 12 && r10 == 9 && s2_adpcm_consts_ok(rsp)) {
++        auto mh = [](uint32_t a) -> int32_t { return (int16_t)((RSP_MEM_BU(0, a) << 8) | RSP_MEM_BU(1, a)); };
++        auto sat_mid = [](int64_t acc) -> int16_t { return acc < -0x80000000LL ? -0x8000 : acc > 0x7FFFFFFFLL ? 0x7FFF : (int16_t)(acc >> 16); };
++        auto sdv16 = [](uint32_t addr, const int16_t* v) {
++            for (uint32_t b = 0; b < 16; b++) RSP_MEM_BU(0, addr + b) = (uint8_t)(b & 1 ? v[b >> 1] : v[b >> 1] >> 8);
++        };
++        int32_t b0[8], b1[8], x[16];
++        uint8_t d[8];
++        int16_t y[8], z[8];
++        auto load = [&](uint32_t h, uint32_t dp) {   // book row 0/1 (LQV, aligned) and the 8 data bytes (LDV)
++            const uint32_t bk = r15 + ((h & 0xF) << 5);
++            for (int i = 0; i < 8; i++) { b0[i] = mh(bk + 2 * i); b1[i] = mh(bk + 16 + 2 * i); d[i] = RSP_MEM_BU(0, dp + i); }
++        };
++        int32_t prev6 = rsp.vpu.r[27].s16(6), prev7 = rsp.vpu.r[27].s16(7);
++        uint32_t hdr = RSP_MEM_BU(0, r21);
++        load(hdr, r20);
++        for (;;) {
++            const int32_t sh = 12 - (int32_t)(hdr >> 4);
++            const uint16_t scale = sh == 0 ? 0xFFFF : (uint16_t)(0x8000u >> ((sh - 1) & 31));
++            for (int i = 0; i < 16; i++) {
++                const int32_t n = (int16_t)(((d[i >> 1] >> (i & 1 ? 0 : 4)) & 0xF) << 12);   // VAND + VMUDN/VMADN
++                x[i] = sh > 0 ? sat_mid((int64_t)n * scale) : n;                               // VMUDM by v22[0]
++            }
++            for (int i = 0; i < 8; i++) {
++                int64_t s = (int64_t)b0[i] * prev6 + (int64_t)b1[i] * prev7 + (int64_t)x[i] * 0x800;
++                for (int k = 0; k < i; k++) s += (int64_t)b1[i - 1 - k] * x[k];
++                y[i] = sat_mid((int64_t)(int32_t)(uint32_t)s * 32);
++            }
++            for (int i = 0; i < 8; i++) {
++                int64_t s = (int64_t)b0[i] * y[6] + (int64_t)b1[i] * y[7] + (int64_t)x[8 + i] * 0x800;
++                for (int k = 0; k < i; k++) s += (int64_t)b1[i - 1 - k] * x[8 + k];
++                z[i] = sat_mid((int64_t)(int32_t)(uint32_t)s * 32);
++            }
++            // The next frame's header, data and book are read before this frame is stored, as in the vector loop.
++            r20 = RSP_ADD32(r20, r10);
++            r21 = RSP_ADD32(r21, r10);
++            hdr = RSP_MEM_BU(0, r21);
++            load(hdr, r20);
++            r18 = RSP_ADD32(r18, -0X20);
++            sdv16(r19, y);
++            sdv16(r19 + 0x10, z);
++            prev6 = z[6]; prev7 = z[7];
++            r19 = RSP_ADD32(r19, 0X20);
++            if (RSP_SIGNED(r18) <= 0) break;
++        }
++        for (int i = 0; i < 8; i++) { rsp.vpu.r[28].s16(i) = y[i]; rsp.vpu.r[27].s16(i) = z[i]; }
++        r1 = hdr; r11 = (hdr & 0xF) << 5; r13 = RSP_ADD32(r11, r15); r12 = RSP_ADD32(r13, -0XE);
++        r14 = RSP_SUB32(r9, hdr >> 4); r2 = RSP_ADD32(r14, -0X1); r3 = 0x8000;
++        r4 = r14 == 0 ? 0xFFFFFFFFu : (uint32_t)S32(U32(r3) >> (r2 & 31));
++        goto L_1504;
++    }
++#endif
+ L_13C0:
+     // add         $20, $20, $10
+     r20 = RSP_ADD32(r20, r10);
+@@ -1163,6 +1242,60 @@
+     r10 = RSP_MEM_H_LOAD(0XE, r21);
+     // lh          $2, 0xE($20)
+     r2 = RSP_MEM_H_LOAD(0XE, r20);
++#ifdef S2_ASP_NATIVE
++    // P35b [Proton]: RESAMPLE (0x05) inner loop L_16A4..L_17A4 in scalar C++, bit-exact with the
++    // vector code below as rsp_vu_impl runs it (checked against it on the P35 captures). The vector
++    // unit on the 3DS is emulated lane by lane, ~60 ops per 8 samples; this does the same math directly.
++    // It assumes the DMEM constants this ucode loads into v25/v29-v31; any other value keeps the vector loop.
++    if (s2_resample_consts_ok(rsp)) {
++        auto mh = [](uint32_t a) -> int32_t { return (int16_t)((RSP_MEM_BU(0, a) << 8) | RSP_MEM_BU(1, a)); };
++        auto sat_lo = [](int64_t acc) -> uint16_t { return acc < -0x80000000LL ? 0x0000 : acc > 0x7FFFFFFFLL ? 0xFFFF : (uint16_t)acc; };
++        auto sat_mid = [](int64_t acc) -> int16_t { return acc < -0x80000000LL ? -0x8000 : acc > 0x7FFFFFFFLL ? 0x7FFF : (int16_t)(acc >> 16); };
++        auto sat16 = [](int32_t v) -> int32_t { return v < -32768 ? -32768 : v > 32767 ? 32767 : v; };
++        auto sqv = [](uint32_t addr, const uint16_t* v) {   // SQV: stops at the 16-byte boundary
++            for (uint32_t b = 0; b < 16 - (addr & 15); b++) RSP_MEM_BU(0, addr + b) = (uint8_t)(b & 1 ? v[b >> 1] : v[b >> 1] >> 8);
++        };
++        const int64_t P = rsp.vpu.r[18].u16(4);        // pitch (unsigned in VMADM)
++        const int64_t B = rsp.vpu.r[18].s16(2);        // input base - history
++        const int64_t T = rsp.vpu.r[18].s16(3);        // resample table (0xE0)
++        const uint32_t K = rsp.vpu.r[18].u16(5);       // 0x40: fraction -> table entry
++        int64_t f7 = rsp.vpu.r[23].u16(7), i7 = rsp.vpu.r[22].s16(7);
++        uint32_t sa[8] = { r17, r16, r15, r14, r13, r12, r11, r10 };   // sample address per lane
++        uint32_t ta[8] = { r9, r8, r7, r6, r5, r4, r3, r2 };           // table entry per lane
++        uint16_t n22[8], n23[8], n21[8], n17[8], out[8];
++        for (;;) {
++            const int64_t base = (i7 << 16) + f7;              // VMUDM v31*v23[7] + VMADH v31*v22[7]
++            for (int i = 0; i < 8; i++) {
++                const int64_t acc = base + (int64_t)(2 * (i + 1)) * P;   // VMADM v25*P, v25 = 2,4..16
++                n22[i] = (uint16_t)sat_mid(acc);
++                n23[i] = sat_lo(acc);
++                n21[i] = sat_lo(B + (int64_t)n22[i] * 2);
++                n17[i] = sat_lo((int64_t)(uint16_t)((uint32_t)n23[i] * K >> 16) * 8 + T);
++            }
++            for (int l = 0; l < 8; l++) {
++                int32_t p[4];
++                for (int k = 0; k < 4; k++)
++                    p[k] = sat_mid((int64_t)mh(sa[l] + 2 * k) * mh(ta[l] + 2 * k) * 2 + 0x8000);   // VMULF
++                out[l] = (uint16_t)sat16(sat16(p[0] + p[1]) + sat16(p[2] + p[3]));         // VADD 1q, 2h
++            }
++            sqv(r21, n21);
++            sqv(r20, n17);
++            for (int i = 0; i < 8; i++) { sa[i] = (uint32_t)mh(r21 + 2 * i); ta[i] = (uint32_t)mh(r20 + 2 * i); }
++            r18 = RSP_ADD32(r18, -0X10);
++            sqv(r19, out);
++            f7 = n23[7]; i7 = (int16_t)n22[7];
++            if (RSP_SIGNED(r18) <= 0) break;
++            r19 = RSP_ADD32(r19, 0X10);
++        }
++        for (int i = 0; i < 8; i++) {
++            rsp.vpu.r[22].u16(i) = n22[i]; rsp.vpu.r[23].u16(i) = n23[i];
++            rsp.vpu.r[21].u16(i) = n21[i]; rsp.vpu.r[17].u16(i) = n17[i];
++        }
++        r17 = sa[0]; r16 = sa[1]; r15 = sa[2]; r14 = sa[3]; r13 = sa[4]; r12 = sa[5]; r11 = sa[6]; r10 = sa[7];
++        r9 = ta[0]; r8 = ta[1]; r7 = ta[2]; r6 = ta[3]; r5 = ta[4]; r4 = ta[5]; r3 = ta[6]; r2 = ta[7];
++        goto L_17A4;
++    }
++#endif
+ L_16A4:
+     // ldv         $v16[0], 0x0($17)
+     rsp.LDV<0>(rsp.vpu.r[16], r17, 0X0);
+@@ -1555,6 +1688,53 @@
+     r10 = r26 & 0X10;
+     // lqv         $v8[0], 0x0($19)
+     rsp.LQV<0>(rsp.vpu.r[8], r19, 0X0);
++#ifdef S2_ASP_NATIVE
++    // P35b [Proton]: 0x13 (envelope mixer) loop L_1964..L_1A3C in scalar C++, bit-exact with the vector
++    // code below. Per 16 samples: in * volume (v1, ramped by v4 each pass, 16-bit wrap) into dry L/R,
++    // that * wet amount into wet L/R, with the XOR inversions of v2. All loads of a pass come before its
++    // stores, and the stores keep the vector order, so overlapping buffers end up the same.
++    {
++        auto mh = [](uint32_t a) -> int32_t { return (int16_t)((RSP_MEM_BU(0, a) << 8) | RSP_MEM_BU(1, a)); };
++        auto ld8 = [&](uint32_t a, int32_t* v) { for (int i = 0; i < 8; i++) v[i] = mh(a + 2 * i); };
++        auto st8 = [](uint32_t a, const int32_t* v) {   // SQV on a 16-byte aligned address
++            for (uint32_t b = 0; b < 16; b++) RSP_MEM_BU(0, a + b) = (uint8_t)(b & 1 ? v[b >> 1] : v[b >> 1] >> 8);
++        };
++        auto mudm = [](int32_t s, uint32_t u) -> int32_t { return (int32_t)(((int64_t)s * (int64_t)u) >> 16); };   // VMUDM, never saturates
++        auto sat16 = [](int32_t v) -> int32_t { return v < -32768 ? -32768 : v > 32767 ? 32767 : v; };
++        uint16_t vol[8], inc[8];
++        for (int i = 0; i < 8; i++) { vol[i] = rsp.vpu.r[1].u16(i); inc[i] = rsp.vpu.r[4].u16(i); }
++        const int32_t x0 = rsp.vpu.r[2].s16(0), x1 = rsp.vpu.r[2].s16(1), x2 = rsp.vpu.r[2].s16(2), x3 = rsp.vpu.r[2].s16(3);
++        int32_t in1[8], in2[8], dl1[8], dr1[8], dl2[8], dr2[8], wl1[8], wr1[8], wl2[8], wr2[8];
++        for (int i = 0; i < 8; i++) in1[i] = rsp.vpu.r[8].s16(i);
++        for (;;) {
++            ld8(r19 + 0x10, in2);
++            r19 = RSP_ADD32(r19, 0X20);
++            r20 = RSP_ADD32(r20, -0X10);
++            ld8(r14, dl1); ld8(r15, dr1); ld8(r14 + 0x10, dl2); ld8(r15 + 0x10, dr2);
++            ld8(r16, wl1); ld8(r17, wr1); ld8(r16 + 0x10, wl2); ld8(r17 + 0x10, wr2);
++            for (int i = 0; i < 8; i++) {
++                const int32_t a = (int16_t)(mudm(in1[i], vol[0]) ^ x0), b = (int16_t)(mudm(in1[i], vol[2]) ^ x1);
++                const int32_t c = (int16_t)(mudm(in2[i], vol[1]) ^ x0), e = (int16_t)(mudm(in2[i], vol[3]) ^ x1);
++                dl1[i] = sat16(dl1[i] + a); dr1[i] = sat16(dr1[i] + b);
++                dl2[i] = sat16(dl2[i] + c); dr2[i] = sat16(dr2[i] + e);
++                const int32_t a2 = (int16_t)(mudm(a, vol[4]) ^ x2), b2 = (int16_t)(mudm(b, vol[4]) ^ x3);
++                const int32_t c2 = (int16_t)(mudm(c, vol[5]) ^ x2), e2 = (int16_t)(mudm(e, vol[5]) ^ x3);
++                if (r10 != 0) { wl1[i] = sat16(wl1[i] + b2); wr1[i] = sat16(wr1[i] + a2); wl2[i] = sat16(wl2[i] + e2); wr2[i] = sat16(wr2[i] + c2); }
++                else          { wl1[i] = sat16(wl1[i] + a2); wr1[i] = sat16(wr1[i] + b2); wl2[i] = sat16(wl2[i] + c2); wr2[i] = sat16(wr2[i] + e2); }
++            }
++            st8(r14, dl1); st8(r15, dr1); st8(r14 + 0x10, dl2); st8(r15 + 0x10, dr2);
++            st8(r16, wl1); st8(r17, wr1);
++            ld8(r19, in1);                              // next pass's first half, read before the last two stores
++            st8(r16 + 0x10, wl2); st8(r17 + 0x10, wr2);
++            r14 = RSP_ADD32(r14, 0X20); r15 = RSP_ADD32(r15, 0X20); r16 = RSP_ADD32(r16, 0X20); r17 = RSP_ADD32(r17, 0X20);
++            for (int i = 0; i < 8; i++) vol[i] = (uint16_t)(vol[i] + inc[i]);   // VADDC; the carry goes to v0, then cleared
++            if (RSP_SIGNED(r20) <= 0) break;
++        }
++        for (int i = 0; i < 8; i++) { rsp.vpu.r[1].u16(i) = vol[i]; rsp.vpu.r[8].s16(i) = (int16_t)in1[i]; }
++        rsp.VXOR<0>(rsp.vpu.r[0], rsp.vpu.r[0], rsp.vpu.r[0]);
++        goto L_1094;
++    }
++#endif
+ L_1964:
+     // lqv         $v15[0], 0x10($19)
+     rsp.LQV<0>(rsp.vpu.r[15], r19, 0X1);
+@@ -1930,6 +2110,47 @@
+     rsp.LQV<0>(rsp.vpu.r[26], r19, 0X1);
+     // lqv         $v28[0], 0x10($20)
+     rsp.LQV<0>(rsp.vpu.r[28], r20, 0X1);
++#ifdef S2_ASP_NATIVE
++    // P35b [Proton]: MIXER (0x0C) loop L_1B98 in scalar C++, bit-exact with the vector code below:
++    // out = sat((out * 0x7FFF * 2 + 0x8000 + in * gain * 2) >> 16) (VMULF + VMACF). Loads and stores
++    // keep the vector order. Unaligned buffers (LQV/SQV stop at the 16-byte boundary) keep the vector loop.
++    if (((r19 | r20) & 15) == 0 && rsp.vpu.r[31].s16(6) == 0x7FFF) {
++        auto mh = [](uint32_t a) -> int32_t { return (int16_t)((RSP_MEM_BU(0, a) << 8) | RSP_MEM_BU(1, a)); };
++        auto ld8 = [&](uint32_t a, int32_t* v) { for (int i = 0; i < 8; i++) v[i] = mh(a + 2 * i); };
++        auto st8 = [](uint32_t a, const int32_t* v) {
++            for (uint32_t b = 0; b < 16; b++) RSP_MEM_BU(0, a + b) = (uint8_t)(b & 1 ? v[b >> 1] : v[b >> 1] >> 8);
++        };
++        auto sat_mid = [](int64_t acc) -> int32_t { return acc < -0x80000000LL ? -0x8000 : acc > 0x7FFFFFFFLL ? 0x7FFF : (int16_t)(acc >> 16); };
++        const int64_t g = rsp.vpu.r[30].s16(0);
++        int32_t o1[8], o2[8], i1[8], i2[8], n1[8], n2[8];
++        for (int i = 0; i < 8; i++) {
++            o1[i] = rsp.vpu.r[27].s16(i); o2[i] = rsp.vpu.r[26].s16(i);
++            i1[i] = rsp.vpu.r[29].s16(i); i2[i] = rsp.vpu.r[28].s16(i);
++        }
++        for (;;) {
++            for (int i = 0; i < 8; i++) {
++                n1[i] = sat_mid((int64_t)o1[i] * 0xFFFE + 0x8000 + (int64_t)i1[i] * g * 2);
++                n2[i] = sat_mid((int64_t)o2[i] * 0xFFFE + 0x8000 + (int64_t)i2[i] * g * 2);
++            }
++            r18 = RSP_ADD32(r18, -0X20);
++            r20 = RSP_ADD32(r20, 0X20);
++            ld8(r20, i1);
++            st8(r19, n1);
++            ld8(r19 + 0x20, o1);
++            st8(r19 + 0x10, n2);
++            ld8(r20 + 0x10, i2);
++            r19 = RSP_ADD32(r19, 0X20);
++            ld8(r19 + 0x10, o2);
++            if (RSP_SIGNED(r18) <= 0) break;
++        }
++        for (int i = 0; i < 8; i++) {
++            rsp.vpu.r[27].s16(i) = (int16_t)o1[i]; rsp.vpu.r[26].s16(i) = (int16_t)o2[i];
++            rsp.vpu.r[29].s16(i) = (int16_t)i1[i]; rsp.vpu.r[28].s16(i) = (int16_t)i2[i];
++        }
++        r13 = RSP_MEM_HU_LOAD(0X0, r24);
++        goto L_1094;
++    }
++#endif
+ L_1B98:
+     // vmulf       $v27, $v27, $v31[6]
+     rsp.VMULF<14>(rsp.vpu.r[27], rsp.vpu.r[27], rsp.vpu.r[31]);
+@@ -2252,6 +2473,43 @@
+     rsp.LDV<8>(rsp.vpu.r[23], r14, 0X4);
+     // lqv         $v15[0], 0x0($13)
+     rsp.LQV<0>(rsp.vpu.r[15], r13, 0X0);
++#ifdef S2_ASP_NATIVE
++    // P35b [Proton]: FILTER (0x07) loop L_1DA4 in scalar C++, bit-exact with the vector code below.
++    // Per 8 samples: acc = 0x8000 (VMULF of v0 = 0) + 2 * (previous block * v23..v17 + this block *
++    // v24..v31), saturated (VMACF chain). The coefficient lanes are read from those registers, already
++    // loaded above. An unaligned buffer (LQV/SQV stop at the 16-byte boundary) keeps the vector loop.
++    if ((r11 & 15) == 0) {
++        auto mh = [](uint32_t a) -> int32_t { return (int16_t)((RSP_MEM_BU(0, a) << 8) | RSP_MEM_BU(1, a)); };
++        auto sat_mid = [](int64_t acc) -> int32_t { return acc < -0x80000000LL ? -0x8000 : acc > 0x7FFFFFFFLL ? 0x7FFF : (int16_t)(acc >> 16); };
++        int32_t cp[8][8], cc[8][8], prev[8], cur[8], y[8];   // cp[k][i]: v15[k] (k = 1..7) on lane i; cc[k][i]: v16[k]
++        for (int i = 0; i < 8; i++) {
++            cp[0][i] = 0;
++            for (int k = 1; k < 8; k++) cp[k][i] = rsp.vpu.r[24 - k].s16(i);
++            for (int k = 0; k < 8; k++) cc[k][i] = rsp.vpu.r[24 + k].s16(i);
++            prev[i] = rsp.vpu.r[15].s16(i);
++        }
++        for (;;) {
++            for (int i = 0; i < 8; i++) cur[i] = mh(r11 + 2 * i);
++            for (int i = 0; i < 8; i++) {
++                int64_t s = 0;
++                for (int k = 1; k < 8; k++) s += (int64_t)cp[k][i] * prev[k];
++                for (int k = 0; k < 8; k++) s += (int64_t)cc[k][i] * cur[k];
++                y[i] = sat_mid(0x8000 + 2 * s);
++            }
++            r15 = RSP_ADD32(r15, -0X10);
++            for (uint32_t b = 0; b < 16; b++) RSP_MEM_BU(0, r11 + b) = (uint8_t)(b & 1 ? y[b >> 1] : y[b >> 1] >> 8);
++            r11 = RSP_ADD32(r11, 0X10);
++            for (int i = 0; i < 8; i++) prev[i] = cur[i];
++            if (RSP_SIGNED(r15) <= 0) break;
++        }
++        for (int i = 0; i < 8; i++) { rsp.vpu.r[16].s16(i) = (int16_t)cur[i]; rsp.vpu.r[14].s16(i) = (int16_t)y[i]; }
++        rsp.VXOR<0>(rsp.vpu.r[0], rsp.vpu.r[0], rsp.vpu.r[0]);
++        rsp.VADDC<0>(rsp.vpu.r[15], rsp.vpu.r[0], rsp.vpu.r[16]);   // v15 and VCO as the last pass leaves them
++        rsp.SQV<0>(rsp.vpu.r[16], r13, 0X0);
++        r3 = RSP_ADD32(0, 0X1F);
++        goto L_1AFC;
++    }
++#endif
+ L_1DA4:
+     // lqv         $v16[0], 0x0($11)
+     rsp.LQV<0>(rsp.vpu.r[16], r11, 0X0);
+--- s2-3ds/platform/3ds/CMakeLists.txt.antes-0035
++++ s2-3ds/platform/3ds/CMakeLists.txt
+@@ -99,6 +99,11 @@
+     set_property(SOURCE "${S2_ROOT}/rsp-up/aspMain_ps2.cpp" APPEND PROPERTY
+         COMPILE_DEFINITIONS "S2_DMA_CMD_W0=r26" "S2_DMA_CMD_W1=r25")
+ endif()
++# s2-3ds P35b: aspMain_ps2 RESAMPLE 0x05, ADPCM 0x01, mixers 0x13/0x0C and FILTER 0x07 loops in scalar C++ (bit-exact, see rsp-up/aspMain_ps2.cpp).
++option(S2_ASP_NATIVE "Native audio command loops in aspMain_ps2" OFF)
++if(S2_ASP_NATIVE)
++    set_property(SOURCE "${S2_ROOT}/rsp-up/aspMain_ps2.cpp" APPEND PROPERTY COMPILE_DEFINITIONS "S2_ASP_NATIVE")
++endif()
+ option(S2_NULL_RENDERER "Build with rt64-3ds's null renderer" OFF)
+ if(S2_NULL_RENDERER)
+     target_compile_definitions(PokemonStadium2Recompiled3DS PRIVATE S2_NULL_RENDERER)

@@ -1,0 +1,30 @@
+diff -ruN a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp
+--- a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp	2026-11-20 15:22:29.540669507 -0400
++++ b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp	2026-11-20 15:22:29.571548806 -0400
+@@ -4108,6 +4108,7 @@
+         uint16_t w = 0, h = 0;
+         C3D_Mtx proj{};
+         uint32_t clear_frame = ~0u;
++        uint32_t fail_frame = ~0u;     // D45: the frame its creation failed in (no retry per draw)
+     };
+     RttTarget rtt_[rt64_3ds::kMaxRtt];
+     uint32_t rtt_room_frame_ = ~0u - 8;          // the texture cache last gave VRAM back for a target
+@@ -4121,6 +4122,10 @@
+             // the GPU may still read it): retire it until the next frame start.
+             if (t.rt != nullptr) { retired_rtt_.push_back({ t.rt, t.tex }); t.rt = nullptr; }
+             if (img.pot_w == 0 || img.pot_h == 0) return nullptr;
++            // D45 (nexus): bind_target is asked once per draw into the image;
++            // a target that failed this frame is not tried again (each try
++            // asked VRAM again and logged: 37 lines on the console's VS).
++            if (t.fail_frame == frames_) return nullptr;
+             // Short of VRAM (textures took it): the texture cache gives some
+             // back (free three frames on) and keeps it free; again every four
+             // frames the target still fails.
+@@ -4137,6 +4142,7 @@
+                 if (half) fprintf(stderr, "rt64-3ds: render texture %d at 16 bits (RGBA5551 + D16) for VRAM\n", i);
+             }
+             if (!made) {
++                t.fail_frame = frames_;
+                 if (frames_ - rtt_room_frame_ >= 4) { textures_.make_vram_room(need); rtt_room_frame_ = frames_; }
+                 if (++rtt_no_vram_ <= 5 || (rtt_no_vram_ & 255) == 0)
+                     fprintf(stderr, "rt64-3ds: no VRAM for a %ux%u render texture (%u times)\n", (unsigned)img.pot_w, (unsigned)img.pot_h, (unsigned)rtt_no_vram_);

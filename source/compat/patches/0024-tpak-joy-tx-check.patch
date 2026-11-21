@@ -1,0 +1,16 @@
+--- a/compat/s2_link_3ds.cpp
++++ b/compat/s2_link_3ds.cpp
+@@ -113,6 +113,13 @@
+                     blk[rx_i + 1] = 0x00;
+                     blk[rx_i + 2] = tpak::has_pak(chan) ? 0x01 : 0x00;
+                 }
++            } else if ((cmd == JOY_READ && tx < 3) || (cmd == JOY_WRITE && tx < 35)) {
++                // 0024: frame curto demais para o comando; antes lia bytes de fora do frame
++                // (ou além de blk[63]) e mandava lixo para tpak::write_block.
++                static int short_warn = 0;
++                if (short_warn++ < 8)
++                    std::fprintf(stderr, "[joybus] short frame: cmd=0x%02x tx=%d chan=%d\n", cmd, tx, chan);
++                no_device = true;
+             } else if (cmd == JOY_READ) {
+                 // tx = [cmd][addr_hi][addr_lo]; rx = 32 data + 1 crc.
+                 const uint16_t addr = static_cast<uint16_t>((blk[cmd_i + 1] << 8) | blk[cmd_i + 2]);

@@ -1,0 +1,73 @@
+--- s2-3ds/rsp-up/aspMain_ps2.cpp.antes-0059
++++ s2-3ds/rsp-up/aspMain_ps2.cpp
+@@ -56,6 +56,19 @@
+     }
+     for (uint32_t b = 0; b < n; b++) RSP_MEM_BU(0, a + b) = (uint8_t)(b & 1 ? v[b >> 1] : v[b >> 1] >> 8);
+ }
++// P48: 4 halfwords from any DMEM byte address (the RESAMPLE input is often odd): 3 host words
++// (each = one big-endian N64 word) and a shift, instead of 8 masked byte loads. Near the end of
++// DMEM (the read would wrap) it goes halfword by halfword.
++static inline void s2_ld4(uint32_t a, int32_t* v) {
++    a &= 0xFFF;
++    if (a > 0xFF4) { for (int k = 0; k < 4; k++) v[k] = s2_dh(a + 2 * k); return; }
++    const uint32_t b = a & ~3u, sh = (a & 3) * 8;
++    uint32_t w0, w1, w2;
++    memcpy(&w0, dmem + b, 4); memcpy(&w1, dmem + b + 4, 4); memcpy(&w2, dmem + b + 8, 4);
++    uint64_t x = ((uint64_t)w0 << 32) | w1;
++    if (sh) x = (x << sh) | (w2 >> (32 - sh));
++    v[0] = (int16_t)(x >> 48); v[1] = (int16_t)(x >> 32); v[2] = (int16_t)(x >> 16); v[3] = (int16_t)x;
++}
+ // P39: 8 halfwords at a 4-byte aligned address that does not wrap: host word k = N64 word (elements 2k, 2k+1).
+ static inline void s2_ld8(uint32_t a, int32_t* v) {
+     a &= 0xFFF;
+@@ -811,15 +824,18 @@
+                 const int32_t n = (int16_t)(((d[i >> 1] >> (i & 1 ? 0 : 4)) & 0xF) << 12);   // VAND + VMUDN/VMADN
+                 x[i] = sh > 0 ? sat_mid((int64_t)n * scale) : n;                               // VMUDM by v22[0]
+             }
++            // P48: only the sum's low 32 bits count (the accumulator keeps ACCH:ACCM), so it is done in
++            // uint32 with wrap-around; sat_mid(s * 32) = clamp(s >> 11), all in 32 bits.
++            auto sat11 = [](uint32_t s) -> int16_t { const int32_t v = (int32_t)s >> 11; return v < -32768 ? -32768 : v > 32767 ? 32767 : (int16_t)v; };
+             for (int i = 0; i < 8; i++) {
+-                int64_t s = (int64_t)b0[i] * prev6 + (int64_t)b1[i] * prev7 + (int64_t)x[i] * 0x800;
+-                for (int k = 0; k < i; k++) s += (int64_t)b1[i - 1 - k] * x[k];
+-                y[i] = sat_mid((int64_t)(int32_t)(uint32_t)s * 32);
++                uint32_t s = (uint32_t)(b0[i] * prev6) + (uint32_t)(b1[i] * prev7) + (uint32_t)(x[i] * 0x800);
++                for (int k = 0; k < i; k++) s += (uint32_t)(b1[i - 1 - k] * x[k]);
++                y[i] = sat11(s);
+             }
+             for (int i = 0; i < 8; i++) {
+-                int64_t s = (int64_t)b0[i] * y[6] + (int64_t)b1[i] * y[7] + (int64_t)x[8 + i] * 0x800;
+-                for (int k = 0; k < i; k++) s += (int64_t)b1[i - 1 - k] * x[8 + k];
+-                z[i] = sat_mid((int64_t)(int32_t)(uint32_t)s * 32);
++                uint32_t s = (uint32_t)(b0[i] * y[6]) + (uint32_t)(b1[i] * y[7]) + (uint32_t)(x[8 + i] * 0x800);
++                for (int k = 0; k < i; k++) s += (uint32_t)(b1[i - 1 - k] * x[8 + k]);
++                z[i] = sat11(s);
+             }
+             // The next frame's header, data and book are read before this frame is stored, as in the vector loop.
+             r20 = RSP_ADD32(r20, r10);
+@@ -1300,9 +1316,13 @@
+                 n17[i] = sat_lo((int64_t)(uint16_t)((uint32_t)n23[i] * K >> 16) * 8 + T);
+             }
+             for (int l = 0; l < 8; l++) {
+-                int32_t p[4];
+-                for (int k = 0; k < 4; k++)
+-                    p[k] = sat_mid((int64_t)mh(sa[l] + 2 * k) * mh(ta[l] + 2 * k) * 2 + 0x8000);   // VMULF
++                int32_t p[4], sv[4], cv[4];
++                s2_ld4(sa[l], sv);
++                s2_ld4(ta[l], cv);
++                for (int k = 0; k < 4; k++) {   // VMULF in 32 bits; only -32768 * -32768 saturates
++                    const int32_t pr = sv[k] * cv[k];
++                    p[k] = pr == 0x40000000 ? 0x7FFF : (int32_t)((uint32_t)pr * 2u + 0x8000u) >> 16;
++                }
+                 out[l] = (uint16_t)sat16(sat16(p[0] + p[1]) + sat16(p[2] + p[3]));         // VADD 1q, 2h
+             }
+             sqv(r21, n21);
+@@ -1724,7 +1744,7 @@
+         auto mh = s2_dh;
+         auto ld8 = s2_ld8;
+         auto st8 = s2_st8<int32_t>;   // SQV on a 16-byte aligned address
+-        auto mudm = [](int32_t s, uint32_t u) -> int32_t { return (int32_t)(((int64_t)s * (int64_t)u) >> 16); };   // VMUDM, never saturates
++        auto mudm = [](int32_t s, uint32_t u) -> int32_t { return (s * (int32_t)u) >> 16; };   // VMUDM, never saturates; |s16 * u16| < 2^31 (P48: 32 bits)
+         auto sat16 = [](int32_t v) -> int32_t { return v < -32768 ? -32768 : v > 32767 ? 32767 : v; };
+         uint16_t vol[8], inc[8];
+         for (int i = 0; i < 8; i++) { vol[i] = rsp.vpu.r[1].u16(i); inc[i] = rsp.vpu.r[4].u16(i); }

@@ -1,0 +1,14 @@
+diff -ruN a/s2-3ds/platform/3ds/main_3ds.cpp b/s2-3ds/platform/3ds/main_3ds.cpp
+--- a/s2-3ds/platform/3ds/main_3ds.cpp	2026-11-20 18:48:51.281714044 -0400
++++ b/s2-3ds/platform/3ds/main_3ds.cpp	2026-11-20 18:48:51.300099745 -0400
+@@ -303,6 +303,10 @@
+     desc.render.unclassified_persp = rt64_3ds::StereoClass::World;
+     desc.render.unclassified_ortho = rt64_3ds::StereoClass::Hud;
+     desc.render.fix_rect_lr = true;
++    // D53 (nexus): the Poke Ball's white flash and fade are a full-frame
++    // quad drawn as triangles: unstretched, it covered the 320-wide frame
++    // and left the wide screen's margins showing the field (a white box).
++    desc.render.stretch_tint_quads = true;
+     desc.render.render_to_texture = true;   // photos and the GB Tower screen are drawn into images
+     desc.render.crosshair_row = false;
+     desc.render.eye_depth16 = true;

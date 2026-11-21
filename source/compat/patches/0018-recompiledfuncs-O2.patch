@@ -1,0 +1,11 @@
+--- a/platform/3ds/CMakeLists.txt
++++ b/platform/3ds/CMakeLists.txt
+@@ -48,7 +48,7 @@
+     "${S2_GAME_DIR}/generated" "${CMAKE_CURRENT_LIST_DIR}" "${S2_ROOT}/compat" "${S2_RECOMP_INCLUDE}"
+     "${RT64_3DS_NMR_DIR}/ultramodern/include" "${RT64_3DS_NMR_DIR}/librecomp/include")
+ target_compile_options(RecompiledFuncs PRIVATE
+-    -Os -fno-strict-aliasing -w -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration
++    -O2 -fno-strict-aliasing -w -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration
+     -include "${CMAKE_CURRENT_LIST_DIR}/stadium2_host_protos.h")
+ 
+ # The runtime compatibility layer for the fork's generated code

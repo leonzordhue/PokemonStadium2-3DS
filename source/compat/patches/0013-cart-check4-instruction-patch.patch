@@ -1,0 +1,18 @@
+--- a/game.toml
++++ b/game.toml
+@@ -161,6 +161,15 @@
+ vram = 0x82700E10
+ value = 0x10000002
+ 
++# D21 (Nexus): the 4th check, Game_DoCopyProtection (func_80064C20), same shape
++# as the 3 above: reads 0xB0000E38, wants low16 0x828A (US word 0x1060828A),
++# else stores -0x10. `beq t1, at` at func+0x40 -> `b` to the exit at +0x4C.
++# Without it Game_Thread spins at 0x80064FD4 (test 182059).
++[[patches.instruction]]
++func = "func_80064C20"
++vram = 0x80064C60
++value = 0x10000002
++
+ # Stadium 2 writes AI DRAM/LEN directly instead of calling osAiSetNextBuffer.
+ [[patches.hook]]
+ func = "func_800195C0"

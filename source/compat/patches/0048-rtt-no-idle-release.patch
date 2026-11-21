@@ -1,0 +1,26 @@
+diff -ruN a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp
+--- a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp	2026-11-20 17:08:11.413301319 -0400
++++ b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp	2026-11-20 17:08:11.439889319 -0400
+@@ -4193,18 +4193,10 @@
+     // Out of the frame, just before C3D_FrameBegin (which would wait for the
+     // GPU anyway): render targets ensure_rtt replaced.
+     void retire_rtt_targets() {
+-        // D50 (nexus): a target neither drawn into nor sampled for kRttIdle
+-        // frames gives its VRAM back (the menus' 128x512 label images held
+-        // 512 KB each into the VS and the battle, whose 512x512 targets then
+-        // failed on the console). An image sampled again later is drawn
+-        // again by the game or samples transparent.
+-        static constexpr uint32_t kRttIdle = 90;
+-        for (RttTarget& t : rtt_) {
+-            if (t.rt == nullptr || frames_ - t.used_frame < kRttIdle) continue;
+-            retired_rtt_.push_back({ t.rt, t.tex });
+-            t.rt = nullptr; t.w = t.h = 0;
+-            rtt_freed_++;
+-        }
++        // D50b (nexus): no release of idle targets. On the console (console-4
++        // log) they failed twice, while releasing the idle ones blacked out
++        // the VS and battle portraits, which the game samples long after
++        // drawing them (8948 samples of a released target).
+         for (RetiredRtt& r : retired_rtt_) { C3D_RenderTargetDelete(r.rt); C3D_TexDelete(&r.tex); }
+         retired_rtt_.clear();
+     }

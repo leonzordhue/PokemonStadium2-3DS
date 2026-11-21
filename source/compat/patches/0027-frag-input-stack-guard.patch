@@ -1,0 +1,29 @@
+--- a/compat/s2_compat.cpp
++++ b/compat/s2_compat.cpp
+@@ -343,14 +343,24 @@
+ }
+ } // namespace
+ 
++// 0025: a pilha nunca fica negativa (antes, um pop a mais deixava t_input_sp = -1 e o push
++// seguinte gravava em t_input_stack[-1]). Overflow conta (para casar com os pops), mas não grava.
++static int s2_input_stack_warn = 0;
+ extern "C" void librecomp_fragment_input_push(uint32_t input) {
+-    if (t_input_sp < 16) t_input_stack[t_input_sp] = input;
++    if (t_input_sp >= 0 && t_input_sp < 16) t_input_stack[t_input_sp] = input;
++    else if (s2_input_stack_warn++ < 8) fprintf(stderr, "[s2] fragment input stack overflow (sp=%d, input=%08X)\n", t_input_sp, input);
+     t_input_sp++;
+ }
+ 
+ extern "C" uint32_t librecomp_fragment_resolve_exit(uint32_t game_result, uint32_t /*data_ctx_addr*/) {
++    if (t_input_sp <= 0) {
++        if (s2_input_stack_warn++ < 8) fprintf(stderr, "[s2] fragment input stack underflow (result=%08X)\n", game_result);
++        t_input_sp = 0;
++        return game_result;
++    }
+     t_input_sp--;
+-    const uint32_t input = t_input_stack[(t_input_sp >= 0 && t_input_sp < 16) ? t_input_sp : 0];
++    if (t_input_sp >= 16) return game_result;   // entrada perdida no overflow: já avisado no push
++    const uint32_t input = t_input_stack[t_input_sp];
+     if (g_sections == nullptr) return game_result;
+     std::lock_guard<std::mutex> lock(g_frag_mutex);
+     if (is_synthetic_addr(input)) {

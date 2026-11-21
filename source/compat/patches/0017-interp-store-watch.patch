@@ -1,0 +1,34 @@
+--- a/compat/mips_interp.cpp
++++ b/compat/mips_interp.cpp
+@@ -66,6 +66,18 @@
+ // divergence — don't guess.
+ static const bool g_interp_trace = std::getenv("PSR_INTERP_TRACE") != nullptr;
+ 
++// s2-3ds (Nexus D19b): store watchpoint. In test 214407 thread 7's OSThread (0x80126530) got id 0x8000003A
++// right after interpreted 0xEF code ran, and the scheduler lost the thread. Logs the first stores into
++// [g_s2_watch_lo, g_s2_watch_hi) with the PC; set both to 0 to turn it off.
++uint32_t g_s2_watch_lo = 0x80126530u, g_s2_watch_hi = 0x80126530u + 0x1B0u;
++int g_s2_watch_left = 16;
++inline void s2_watch(uint32_t addr, uint32_t size, uint32_t pc, uint32_t insn) {
++    if (g_s2_watch_left > 0 && addr < g_s2_watch_hi && addr + size > g_s2_watch_lo) {
++        g_s2_watch_left--;
++        std::fprintf(stderr, "[interp] WATCH store 0x%08X (+%u) at PC 0x%08X insn 0x%08X\n", addr, size, pc, insn);
++    }
++}
++
+ inline uint32_t ifetch(uint8_t* rdram, uint32_t pc) {
+     // Instruction words read back as the native big-endian value via MEM_WU
+     // (RDRAM is stored word-native; only sub-word access needs the ^ swap).
+@@ -182,6 +194,12 @@
+     case 0x25: setR(rt, (gpr)(uint64_t)MEM_HU(simm, R[rs])); return true;         // lhu
+     case 0x27: setR(rt, (gpr)(uint64_t)(uint32_t)MEM_WU(simm, R[rs])); return true; // lwu
+     case 0x37: setR(rt, load_doubleword(rdram, R[rs], simm)); return true;        // ld
++    case 0x28: case 0x29: case 0x2B: case 0x3F: case 0x2A: case 0x2E: case 0x2C: case 0x2D:   // D19b watch
++        s2_watch((uint32_t)R[rs] + (uint32_t)(int32_t)simm, op == 0x3F ? 8u : op == 0x2B ? 4u : 2u, pc, insn);
++        break;
++    default: break;
++    }
++    switch (op) {
+     case 0x28: MEM_B(simm, R[rs]) = (int8_t)R[rt];  return true;                  // sb
+     case 0x29: MEM_H(simm, R[rs]) = (int16_t)R[rt]; return true;                  // sh
+     case 0x2B: MEM_W(simm, R[rs]) = (int32_t)R[rt]; return true;                  // sw

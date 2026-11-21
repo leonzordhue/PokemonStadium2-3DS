@@ -1,0 +1,50 @@
+--- BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds.h.antes-0033	2026-11-20 11:24:04.255285943 -0400
++++ BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds.h	2026-11-20 11:24:04.256133143 -0400
+@@ -298,6 +298,12 @@
+     // every frame) clears the eyes to its colour instead of drawing it: one
+     // full screen of fragments less per eye, the same pixels.
+     bool fill_clear = false;
++    // keep_unfilled: a frame that does not start with a full-screen fill
++    // keeps the eyes' colour from the frame before (only depth is cleared),
++    // as the N64's framebuffer keeps it: for games that draw a menu's
++    // background once and then redraw only what changes (Pokemon Stadium 2's
++    // team selection). Off: every frame starts from a cleared screen.
++    bool keep_unfilled = false;
+     // double_eyes (gpu_double_eyes), with frame_interpolation: the
+     // in-between frames get eye targets of their own (two more 240x400
+     // colour + depth buffers: 1125 KB of VRAM at RGBA8/D16, taken last and
+--- BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp.antes-0033	2026-11-20 11:24:04.255424043 -0400
++++ BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp	2026-11-20 11:24:04.256884043 -0400
+@@ -1676,8 +1676,12 @@
+         // rectangle becomes the eyes' clear value, and is not drawn.
+         u32 clear_value = eye_clear_;
+         const int fill_skip = (!offscreen_frame && fill_clear_) ? leading_fill(sfd, &clear_value) : -1;
++        // RenderDesc::keep_unfilled: no leading full-screen fill, keep the colour.
++        u32 unused_value = 0;
++        const C3D_ClearBits eye_clear_bits = (!rt64_3ds::render_desc().keep_unfilled || fill_skip >= 0
++            || (!fill_clear_ && leading_fill(sfd, &unused_value) >= 0)) ? C3D_CLEAR_ALL : C3D_CLEAR_DEPTH;
+         if (!offscreen_frame) {
+-            clear_target(cur_eye_[0], C3D_CLEAR_ALL, clear_value);
++            clear_target(cur_eye_[0], eye_clear_bits, clear_value);
+             draw_on(cur_eye_[0]);
+         }
+         cur_target_ = offscreen_frame ? -2 : -1;
+@@ -1739,7 +1743,7 @@
+         if (pass == 1) {
+             // The right eye: same records, same state, the other shift.
+             tl_split = svcGetSystemTick();
+-            clear_target(cur_eye_[1], C3D_CLEAR_ALL, clear_value);
++            clear_target(cur_eye_[1], eye_clear_bits, clear_value);
+             draw_on(cur_eye_[1]);
+             cur_target_ = -1;
+             frame_viewport_ = false;
+--- s2-3ds/platform/3ds/main_3ds.cpp.antes-0033	2026-11-20 11:24:04.255899943 -0400
++++ s2-3ds/platform/3ds/main_3ds.cpp	2026-11-20 11:24:04.257483643 -0400
+@@ -269,6 +269,7 @@
+     desc.render.eye_depth16 = true;
+     desc.render.intensity_textures16 = true;
+     desc.render.early_drawn = true;
++    desc.render.keep_unfilled = true;   // P37: menus drawn once, then only what changes (team selection)
+     // Audio: the game's own recompiled aspMain (no CPU interpreter for its
+     // variant is known to match yet). Try audio_hle + AudioHle::Aspmain once
+     // the game boots and compare.

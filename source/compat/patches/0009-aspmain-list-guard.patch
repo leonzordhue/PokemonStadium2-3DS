@@ -1,0 +1,43 @@
+--- a/platform/3ds/main_3ds.cpp
++++ b/platform/3ds/main_3ds.cpp
+@@ -73,12 +73,39 @@
+ // would fail it); shortcut: drops the task's work, until nmr 0042 (D9 item 2).
+ RspExitReason s2_empty_ucode(uint8_t*, uint32_t) { return RspExitReason::Broke; }
+ 
++// D17 (Nexus): in the 19/11 log 31 of 32 dropped audio tasks failed on the
++// command right after a SAVEBUFF, with sample-like words (opcode 0x68-0x7F)
++// where the next command should be: the list holds junk past its real end.
++// aspMain_ps2 indexes its 24-entry jr table (ucode_data +0x10) with
++// (w0 >> 24) & 0x7F, so such a word is an "Unhandled jump target" and the
++// whole frame is lost. End the list at the first opcode outside the table
++// (run_task has already put the OSTask at DMEM 0xFC0, data_size at +0x34).
++// shortcut: hides the junk, does not explain it; drop when the list's source is fixed.
++RspExitReason s2_aspmain_guarded(uint8_t* rdram, uint32_t ucode_addr) {
++    uint32_t* task = reinterpret_cast<uint32_t*>(&dmem[0xFC0]);
++    const uint32_t list = task[0x30 / 4] & 0xFFFFF8u, size = task[0x34 / 4];
++    if (list + size <= 0x800000u) {
++        for (uint32_t off = 0; off < size; off += 8) {
++            const uint32_t w0 = *reinterpret_cast<const uint32_t*>(rdram + list + off);
++            if (((w0 >> 24) & 0x7F) < 24) continue;
++            static uint32_t n = 0;
++            if (++n <= 10 || n % 100 == 0)
++                fprintf(stderr, "[S2] audio list %08" PRIX32 " cut at +0x%" PRIX32 " of 0x%" PRIX32 " (w0 %08" PRIX32 ") #%" PRIu32 "\n",
++                        task[0x30 / 4], off, size, w0, n);
++            if (off == 0) return RspExitReason::Broke;   // nothing valid: the ucode would run DMEM leftovers
++            task[0x34 / 4] = off;
++            break;
++        }
++    }
++    return aspMain_ps2(rdram, ucode_addr);
++}
++
+ RspUcodeFunc* get_rsp_microcode(const OSTask* task) {
+     const uint32_t boot_size = (uint32_t)task->t.ucode_boot_size;
+     if (task->t.ucode_boot != 0 && boot_size == 0xA40) return gbTowerMain;
+     if (task->t.ucode_boot != 0 && boot_size == 0x9E4) return gbTowerColorMain;
+     switch (task->t.type) {
+-        case M_AUDTASK:   return aspMain_ps2;
++        case M_AUDTASK:   return s2_aspmain_guarded;   // D17
+         case M_NJPEGTASK: return njpgdspMain;
+         default:
+             fprintf(stderr, "[S2] unknown RSP task type %" PRIu32 "\n", task->t.type);

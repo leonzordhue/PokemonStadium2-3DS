@@ -1,0 +1,71 @@
+--- BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds.h.antes-0034	2026-11-20 12:18:15.493898040 -0400
++++ BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds.h	2026-11-20 12:18:15.494457640 -0400
+@@ -304,6 +304,12 @@
+     // background once and then redraw only what changes (Pokemon Stadium 2's
+     // team selection). Off: every frame starts from a cleared screen.
+     bool keep_unfilled = false;
++    // full_width_on_screen: a colour image as wide as the frame is a
++    // framebuffer even before the VI has shown it (Pokemon Stadium 2 starts
++    // three new 320-wide ones at its battle; drawn off screen, their first
++    // frames were lost and the old 640x480 picture stayed). Off: unknown
++    // images are off screen once two framebuffers are known.
++    bool full_width_on_screen = false;
+     // double_eyes (gpu_double_eyes), with frame_interpolation: the
+     // in-between frames get eye targets of their own (two more 240x400
+     // colour + depth buffers: 1125 KB of VRAM at RGBA8/D16, taken last and
+--- BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_dl.h.antes-0034	2026-11-20 12:18:57.158884296 -0400
++++ BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_dl.h	2026-11-20 12:18:57.160567996 -0400
+@@ -118,6 +118,7 @@
+     // Draw off-screen colour images into textures of their own instead of
+     // dropping them (see FrameRecord::rtts).
+     void set_render_to_texture(bool on);
++    void set_full_width_on_screen(bool on);
+     // RenderDesc::sample_drawn_frame: loads from the colour image being
+     // drawn, after draws went into it, sample the frame drawn so far
+     // (TexDesc::frame, FrameRecord::frame_sample_last), and images of
+--- BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_dl.cpp.antes-0034	2026-11-20 12:18:15.494029540 -0400
++++ BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_dl.cpp	2026-11-20 12:18:57.160162496 -0400
+@@ -1299,6 +1299,7 @@
+     // is neither a presented framebuffer nor the depth buffer is drawn into
+     // a GPU texture of its own, which later loads from that image sample.
+     bool rtt_enabled = false;
++    bool full_width_on_screen = false;     // RenderDesc::full_width_on_screen
+     RttImage rtt_images[kMaxRtt];
+     uint32_t rtt_list[kMaxRtt] = {};    // the list (list_seq) that last drew into each image
+     int rtt_count = 0, rtt_next = 0;
+@@ -1414,6 +1415,7 @@
+         // A framebuffer the VI presents is on screen wherever it lives
+         // (Dinosaur Planet keeps its 640x480 front-end buffers in patch RAM).
+         if (is_presented_fb(a)) return -1;
++        if (full_width_on_screen && width == (uint32_t)screen_w) return -1;   // RenderDesc::full_width_on_screen
+         if (!rtt_enabled) {
+             if (!frame_copy || width == (uint32_t)screen_w || width == 0) return -1;
+             // A copy target: one texture per address and width (Goemon draws
+@@ -4047,6 +4049,7 @@
+     impl_->op_table = gbi == Gbi::F3DEX ? kF3dexOp.v : kF3dex2Op.v;
+ }
+ void Interpreter::set_render_to_texture(bool on) { impl_->rtt_enabled = on; }
++void Interpreter::set_full_width_on_screen(bool on) { impl_->full_width_on_screen = on; }
+ void Interpreter::set_sample_drawn_frame(bool on) { impl_->frame_copy = on; }
+ void Interpreter::set_primary_world_instance(bool on) { impl_->inst_track = on; }
+ void Interpreter::set_unify_world_depth(bool on) { impl_->unify_depth = on; impl_->update_depth_terms(); }
+--- BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp.antes-0034	2026-11-20 12:18:57.159004696 -0400
++++ BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp	2026-11-20 12:18:57.161145496 -0400
+@@ -1479,6 +1479,7 @@
+             }
+             interp_.set_gbi(desc.gbi);
+             interp_.set_render_to_texture(desc.render_to_texture);
++            interp_.set_full_width_on_screen(desc.full_width_on_screen);
+             interp_.set_sample_drawn_frame(desc.sample_drawn_frame);
+             interp_.set_primary_world_instance(desc.primary_world_instance);
+             interp_.set_unify_world_depth(desc.unify_world_depth);
+--- s2-3ds/platform/3ds/main_3ds.cpp.antes-0034	2026-11-20 12:18:15.494244540 -0400
++++ s2-3ds/platform/3ds/main_3ds.cpp	2026-11-20 12:18:15.495546940 -0400
+@@ -269,6 +269,7 @@
+     desc.render.eye_depth16 = true;
+     desc.render.intensity_textures16 = true;
+     desc.render.early_drawn = true;
++    desc.render.full_width_on_screen = true;   // P38: the battle's new 320-wide framebuffers
+     desc.render.keep_unfilled = true;   // P37: menus drawn once, then only what changes (team selection)
+     // Audio: the game's own recompiled aspMain (no CPU interpreter for its
+     // variant is known to match yet). Try audio_hle + AudioHle::Aspmain once

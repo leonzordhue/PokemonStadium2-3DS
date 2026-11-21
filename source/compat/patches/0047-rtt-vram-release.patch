@@ -1,0 +1,83 @@
+diff -ruN a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp
+--- a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp	2026-11-20 16:08:10.252053314 -0400
++++ b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp	2026-11-20 16:26:05.363288383 -0400
+@@ -807,6 +807,10 @@
+             g_stats.late_frames = (int)late_;
+             g_stats.max_gap_ms = max_gap_;
+             late_ = 0;
++            if (rtt_failed_ || rtt_sampled_missing_ || rtt_freed_)
++                fprintf(stderr, "rt64-3ds: rtt this second: %u failed, %u draws sampled a missing one, %u freed idle; VRAM free %u KB\n",
++                        (unsigned)rtt_failed_, (unsigned)rtt_sampled_missing_, (unsigned)rtt_freed_, (unsigned)(vramSpaceFree() / 1024));
++            rtt_failed_ = rtt_sampled_missing_ = rtt_freed_ = 0;
+             max_gap_ = 0;
+             // Times per list drawn (the frame cap's passed-over lists apart).
+             const uint32_t drawn = dl_count_ - passed_count_;
+@@ -2984,7 +2988,19 @@
+             else if (d.tex[t].valid && d.tex[t].rtt >= 0) {
+                 // An off-screen image drawn on the GPU (this frame or earlier).
+                 RttTarget& rt = rtt_[d.tex[t].rtt];
+-                if (rt.rt != nullptr) {
++                if (rt.rt == nullptr && clear_.data != nullptr) {
++                    // D50 (nexus): an image whose target got no VRAM samples
++                    // transparent, not white_ (the console's white screens:
++                    // the 320-wide effect image of the transitions).
++                    if (last_tex_[t] != &clear_) {
++                        C3D_TexBind(t, &clear_);
++                        last_tex_[t] = &clear_; last_tex_param_[t] = 0xFFFFFFFFu;
++                    }
++                    rtt_sampled_missing_++;
++                    bound = true;
++                }
++                else if (rt.rt != nullptr) {
++                    rt.used_frame = frames_;
+                     if (&rt.tex != last_tex_[t]) {
+                         C3D_TexBind(t, &rt.tex);
+                         last_tex_[t] = &rt.tex; last_tex_param_[t] = 0xFFFFFFFEu;
+@@ -4109,10 +4125,12 @@
+         C3D_Mtx proj{};
+         uint32_t clear_frame = ~0u;
+         uint32_t fail_frame = ~0u;     // D45: the frame its creation failed in (no retry per draw)
++        uint32_t used_frame = 0;       // D50: the last frame that drew into it or sampled it
+     };
+     RttTarget rtt_[rt64_3ds::kMaxRtt];
+     uint32_t rtt_room_frame_ = ~0u - 8;          // the texture cache last gave VRAM back for a target
+     uint32_t rtt_no_vram_ = 0;                   // targets refused for VRAM, for the log's first lines
++    uint32_t rtt_failed_ = 0, rtt_sampled_missing_ = 0, rtt_freed_ = 0;   // D50: this second's
+     int cur_target_ = -1;                        // the RTT slot drawn into, -1 = the eye
+     RttTarget* ensure_rtt(int i) {
+         const rt64_3ds::RttImage& img = frame_.rtts[i];
+@@ -4143,6 +4161,7 @@
+             }
+             if (!made) {
+                 t.fail_frame = frames_;
++                rtt_failed_++;
+                 if (frames_ - rtt_room_frame_ >= 4) { textures_.make_vram_room(need); rtt_room_frame_ = frames_; }
+                 if (++rtt_no_vram_ <= 5 || (rtt_no_vram_ & 255) == 0)
+                     fprintf(stderr, "rt64-3ds: no VRAM for a %ux%u render texture (%u times)\n", (unsigned)img.pot_w, (unsigned)img.pot_h, (unsigned)rtt_no_vram_);
+@@ -4166,6 +4185,7 @@
+             clear_target(t.rt, C3D_CLEAR_ALL, 0x000000FF);
+             t.clear_frame = frames_;
+         }
++        t.used_frame = frames_;
+         return &t;
+     }
+     struct RetiredRtt { C3D_RenderTarget* rt; C3D_Tex tex; };
+@@ -4173,6 +4193,18 @@
+     // Out of the frame, just before C3D_FrameBegin (which would wait for the
+     // GPU anyway): render targets ensure_rtt replaced.
+     void retire_rtt_targets() {
++        // D50 (nexus): a target neither drawn into nor sampled for kRttIdle
++        // frames gives its VRAM back (the menus' 128x512 label images held
++        // 512 KB each into the VS and the battle, whose 512x512 targets then
++        // failed on the console). An image sampled again later is drawn
++        // again by the game or samples transparent.
++        static constexpr uint32_t kRttIdle = 90;
++        for (RttTarget& t : rtt_) {
++            if (t.rt == nullptr || frames_ - t.used_frame < kRttIdle) continue;
++            retired_rtt_.push_back({ t.rt, t.tex });
++            t.rt = nullptr; t.w = t.h = 0;
++            rtt_freed_++;
++        }
+         for (RetiredRtt& r : retired_rtt_) { C3D_RenderTargetDelete(r.rt); C3D_TexDelete(&r.tex); }
+         retired_rtt_.clear();
+     }

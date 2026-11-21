@@ -1,0 +1,13 @@
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+index 155e5b5..aca1cc3 100644
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -567,6 +567,8 @@ void run_thread_function(uint8_t* rdram, uint64_t addr, uint64_t sp, uint64_t ar
+ 
+     recomp_func_t* func = get_function(addr);
+     func(rdram, &ctx);
++    // s2-3ds: fork-generated code returns with a pending tailcall; drain it.
++    recomp_handle_tailcalls(rdram, &ctx);
+ }
+ 
+ void init(uint8_t* rdram, recomp_context* ctx, gpr entrypoint) {

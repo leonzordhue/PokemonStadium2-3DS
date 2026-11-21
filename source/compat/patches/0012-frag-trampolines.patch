@@ -1,0 +1,63 @@
+--- a/compat/s2_compat.cpp
++++ b/compat/s2_compat.cpp
+@@ -41,6 +41,7 @@
+     size_t section_index;
+     int32_t base;
+     uint32_t id;
++    std::vector<std::pair<int32_t, recomp_func_t*>> slots;   // trampolins J+nop instalados (D20), runtime e link
+ };
+ std::vector<LiveFragment> g_live;            // o que este arquivo registrou
+ 
+@@ -76,6 +77,41 @@
+     if ((int32_t)link != l.base)     // aliases no endereço de link: só os que ainda apontam para esta variante
+         for (size_t f = 0; f < s.num_funcs; f++)
+             if (s.funcs[f].func) recomp::overlays::remove_loaded_function((int32_t)(link + s.funcs[f].offset), s.funcs[f].func);
++    for (const auto& sl : l.slots) recomp::overlays::remove_loaded_function(sl.first, sl.second);   // só se ainda apontar para esta variante
++}
++
++// Trampolins J+nop da tabela de saltos do fragmento, em [0x20, 1a função real) (fork overlays.cpp:771,
++// scan_fragment_section_trampolines). Lidos antes da relocação (hook na entrada de func_80002210), então o J
++// está no espaço de link. Ex.: 0x80243A90 = base+0x140 (nexus/D18). Devolve o que instalou, para o evict_one.
++std::vector<std::pair<int32_t, recomp_func_t*>> install_slots(uint8_t* rdram, const SectionTableEntry& s, uint32_t link, int32_t base) {
++    std::vector<std::pair<int32_t, recomp_func_t*>> out;
++    const uint32_t pa = (uint32_t)base & 0x1FFFFFFFu;
++    if (pa + 0x10 > kRdramSize || rd_be32(rdram, pa + 0x08) != kFragMagicA || rd_be32(rdram, pa + 0x0C) != kFragMagicB) return out;
++    uint32_t first = s.size;
++    for (size_t f = 0; f < s.num_funcs; f++) {
++        const FuncEntry& fe = s.funcs[f];
++        const bool may_be_slot = fe.offset >= 0x20 && (fe.offset & 7u) == 0 && fe.rom_size == 8;   // fork func_entry_may_be_fragment_jump_slot
++        if (!may_be_slot && fe.offset >= 0x20 && fe.offset < first) first = fe.offset;
++    }
++    for (uint32_t off = 0x20; off + 8 <= first && pa + off + 8 <= kRdramSize; off += 8) {
++        const uint32_t ins = rd_be32(rdram, pa + off);
++        if (rd_be32(rdram, pa + off + 4) != 0 || ((ins >> 26) & 0x3Fu) != 0x02u) continue;
++        const uint32_t tgt = ((link + off + 4) & 0xF0000000u) | ((ins & 0x03FFFFFFu) << 2);
++        if (tgt < link || tgt >= link + s.size) continue;   // shortcut: só alvo no mesmo fragmento; o cruzado fica no interpretador
++        bool recompiled_slot = false;   // o slot já é FuncEntry (rom_size 8): o load_overlay já o instalou
++        for (size_t f = 0; f < s.num_funcs; f++) if (s.funcs[f].func && s.funcs[f].offset == off) recompiled_slot = true;
++        if (recompiled_slot) continue;
++        for (size_t f = 0; f < s.num_funcs; f++) {
++            if (s.funcs[f].func == nullptr || s.funcs[f].offset != tgt - link) continue;
++            const int32_t addrs[2] = { base + (int32_t)off, (int32_t)(link + off) };
++            for (int k = 0; k < ((int32_t)link != base ? 2 : 1); k++) {
++                recomp::overlays::add_loaded_function(addrs[k], s.funcs[f].func);
++                out.push_back({addrs[k], s.funcs[f].func});
++            }
++            break;
++        }
++    }
++    return out;
+ }
+ 
+ void evict_at(int32_t base, size_t keep_index) {
+@@ -270,7 +306,9 @@
+     if ((int32_t)link != fragment_ptr)
+         for (size_t f = 0; f < s.num_funcs; f++)
+             if (s.funcs[f].func) recomp::overlays::add_loaded_function((int32_t)(link + s.funcs[f].offset), s.funcs[f].func);
+-    g_live.push_back({idx, fragment_ptr, id});
++    auto slots = install_slots(rdram, s, link, fragment_ptr);
++    if (!slots.empty()) fprintf(stderr, "[s2] fragmento id=0x%X: %zu trampolins J registrados\n", id, slots.size());
++    g_live.push_back({idx, fragment_ptr, id, std::move(slots)});
+ }
+ 
+ extern "C" void recomp_unregister_runtime_fragment(uint32_t id) {

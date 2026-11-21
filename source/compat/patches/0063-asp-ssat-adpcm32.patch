@@ -1,0 +1,58 @@
+--- s2-3ds/rsp-up/aspMain_ps2.cpp.antes-0063
++++ s2-3ds/rsp-up/aspMain_ps2.cpp
+@@ -56,6 +56,13 @@
+     }
+     for (uint32_t b = 0; b < n; b++) RSP_MEM_BU(0, a + b) = (uint8_t)(b & 1 ? v[b >> 1] : v[b >> 1] >> 8);
+ }
++// P51: clamp to s16 with the ARM SSAT instruction (ARMv6); plain C elsewhere (the host bench).
++#if defined(__arm__)
++#include <arm_acle.h>
++static inline int32_t s2_sat16(int32_t v) { return __ssat(v, 16); }
++#else
++static inline int32_t s2_sat16(int32_t v) { return v < -32768 ? -32768 : v > 32767 ? 32767 : v; }
++#endif
+ // P48: 4 halfwords from any DMEM byte address (the RESAMPLE input is often odd): 3 host words
+ // (each = one big-endian N64 word) and a shift, instead of 8 masked byte loads. Near the end of
+ // DMEM (the read would wrap) it goes halfword by halfword.
+@@ -815,7 +822,8 @@
+         int16_t y[8], z[8];
+         auto load = [&](uint32_t h, uint32_t dp) {   // book row 0/1 (LQV, aligned) and the 8 data bytes (LDV)
+             const uint32_t bk = r15 + ((h & 0xF) << 5);
+-            for (int i = 0; i < 8; i++) { b0[i] = mh(bk + 2 * i); b1[i] = mh(bk + 16 + 2 * i); d[i] = RSP_MEM_BU(0, dp + i); }
++            s2_ld8(bk, b0); s2_ld8(bk + 16, b1);   // P51: by words (the book rows are 16-byte aligned)
++            for (int i = 0; i < 8; i++) d[i] = RSP_MEM_BU(0, dp + i);
+         };
+         int32_t prev6 = rsp.vpu.r[27].s16(6), prev7 = rsp.vpu.r[27].s16(7);
+         uint32_t hdr = RSP_MEM_BU(0, r21);
+@@ -825,11 +833,11 @@
+             const uint16_t scale = sh == 0 ? 0xFFFF : (uint16_t)(0x8000u >> ((sh - 1) & 31));
+             for (int i = 0; i < 16; i++) {
+                 const int32_t n = (int16_t)(((d[i >> 1] >> (i & 1 ? 0 : 4)) & 0xF) << 12);   // VAND + VMUDN/VMADN
+-                x[i] = sh > 0 ? sat_mid((int64_t)n * scale) : n;                               // VMUDM by v22[0]
++                x[i] = sh > 0 ? (n * (int32_t)scale) >> 16 : n;   // VMUDM by v22[0]; |s16 * u16| < 2^31, never saturates (P51)
+             }
+             // P48: only the sum's low 32 bits count (the accumulator keeps ACCH:ACCM), so it is done in
+             // uint32 with wrap-around; sat_mid(s * 32) = clamp(s >> 11), all in 32 bits.
+-            auto sat11 = [](uint32_t s) -> int16_t { const int32_t v = (int32_t)s >> 11; return v < -32768 ? -32768 : v > 32767 ? 32767 : (int16_t)v; };
++            auto sat11 = [](uint32_t s) -> int16_t { return (int16_t)s2_sat16((int32_t)s >> 11); };
+             for (int i = 0; i < 8; i++) {
+                 uint32_t s = (uint32_t)(b0[i] * prev6) + (uint32_t)(b1[i] * prev7) + (uint32_t)(x[i] * 0x800);
+                 for (int k = 0; k < i; k++) s += (uint32_t)(b1[i - 1 - k] * x[k]);
+@@ -1297,7 +1305,7 @@
+         auto mh = s2_dh;
+         auto sat_lo = [](int64_t acc) -> uint16_t { return acc < -0x80000000LL ? 0x0000 : acc > 0x7FFFFFFFLL ? 0xFFFF : (uint16_t)acc; };
+         auto sat_mid = [](int64_t acc) -> int16_t { return acc < -0x80000000LL ? -0x8000 : acc > 0x7FFFFFFFLL ? 0x7FFF : (int16_t)(acc >> 16); };
+-        auto sat16 = [](int32_t v) -> int32_t { return v < -32768 ? -32768 : v > 32767 ? 32767 : v; };
++        auto sat16 = s2_sat16;
+         auto sqv = [](uint32_t addr, const uint16_t* v) {   // SQV: stops at the 16-byte boundary
+             s2_st(addr, v, 16 - (addr & 15));
+         };
+@@ -1764,7 +1772,7 @@
+         auto ld8 = s2_ld8;
+         auto st8 = s2_st8<int32_t>;   // SQV on a 16-byte aligned address
+         auto mudm = [](int32_t s, uint32_t u) -> int32_t { return (s * (int32_t)u) >> 16; };   // VMUDM, never saturates; |s16 * u16| < 2^31 (P48: 32 bits)
+-        auto sat16 = [](int32_t v) -> int32_t { return v < -32768 ? -32768 : v > 32767 ? 32767 : v; };
++        auto sat16 = s2_sat16;
+         uint16_t vol[8], inc[8];
+         for (int i = 0; i < 8; i++) { vol[i] = rsp.vpu.r[1].u16(i); inc[i] = rsp.vpu.r[4].u16(i); }
+         const int32_t x0 = rsp.vpu.r[2].s16(0), x1 = rsp.vpu.r[2].s16(1), x2 = rsp.vpu.r[2].s16(2), x3 = rsp.vpu.r[2].s16(3);

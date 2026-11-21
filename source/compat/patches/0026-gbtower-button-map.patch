@@ -1,0 +1,62 @@
+--- a/platform/3ds/main_3ds.cpp
++++ b/platform/3ds/main_3ds.cpp
+@@ -43,8 +43,7 @@
+ // L=L, R=R, START=START, the D-pad = the C buttons, the C-Stick = the N64
+ // D-pad. The C-Stick's KEY_CSTICK_* bits come in hidKeysHeld on a New 3DS,
+ // so the map takes them as keys and s2_on_init turns off rt64-3ds's own
+-// C-Stick-as-C-buttons. The GB Tower's map (Y=Z, D-pad=D-pad, C-Stick=C)
+-// waits for the screen variable (FILA-PROTON P2), then input_set_map.
++// C-Stick-as-C-buttons. The GB Tower gets kGbTower (below).
+ const ButtonMap kButtons[] = {
+     { KEY_A, N64_A }, { KEY_B, N64_B }, { KEY_X, N64_Z }, { KEY_L, N64_L }, { KEY_R, N64_R },
+     { KEY_START, N64_START },
+@@ -53,6 +52,27 @@
+     { KEY_CSTICK_LEFT, N64_DLEFT }, { KEY_CSTICK_RIGHT, N64_DRIGHT },
+ };
+ 
++// D31b (nexus): the S1's GB Tower map (its scene 38): A, B, Y=Z, START,
++// SELECT=L, L, R, the D-pad = the N64 D-pad, the C-Stick = the C buttons.
++// No scene id needed: the GB Tower is the only screen that runs the
++// gbTowerMain/gbTowerColorMain microcode, so get_rsp_microcode switches the
++// map in on its first task and tpak_flush_loop switches it back after 1 s
++// without one. shortcut: the GB Tower's menus before a game starts keep the
++// normal map; read the S2 scene id if that bothers anyone.
++const ButtonMap kGbTower[] = {
++    { KEY_A, N64_A }, { KEY_B, N64_B }, { KEY_Y, N64_Z }, { KEY_START, N64_START },
++    { KEY_SELECT, N64_L }, { KEY_L, N64_L }, { KEY_R, N64_R },
++    { KEY_DUP, N64_DUP }, { KEY_DDOWN, N64_DDOWN }, { KEY_DLEFT, N64_DLEFT }, { KEY_DRIGHT, N64_DRIGHT },
++    { KEY_CSTICK_UP, N64_CUP }, { KEY_CSTICK_DOWN, N64_CDOWN },
++    { KEY_CSTICK_LEFT, N64_CLEFT }, { KEY_CSTICK_RIGHT, N64_CRIGHT },
++};
++volatile uint64_t g_gb_task_tick = 0;   // svcGetSystemTick of the last GB Tower task
++volatile bool g_gb_map = false;
++void s2_gb_task_seen() {
++    g_gb_task_tick = svcGetSystemTick();
++    if (!g_gb_map) { g_gb_map = true; input_set_map(kGbTower, sizeof(kGbTower) / sizeof(kGbTower[0])); }
++}
++
+ const MenuDefault kDefaults[] = {
+     { "separation", 30 },               // 3D depth: a menu-heavy game, mild by default
+     // The S1 reads the Circle Pad linearly (x80/156) with no deadzone; the
+@@ -132,8 +152,8 @@
+ 
+ RspUcodeFunc* get_rsp_microcode(const OSTask* task) {
+     const uint32_t boot_size = (uint32_t)task->t.ucode_boot_size;
+-    if (task->t.ucode_boot != 0 && boot_size == 0xA40) return gbTowerMain;
+-    if (task->t.ucode_boot != 0 && boot_size == 0x9E4) return gbTowerColorMain;
++    if (task->t.ucode_boot != 0 && boot_size == 0xA40) { s2_gb_task_seen(); return gbTowerMain; }
++    if (task->t.ucode_boot != 0 && boot_size == 0x9E4) { s2_gb_task_seen(); return gbTowerColorMain; }
+     switch (task->t.type) {
+ #ifdef S2_AUDIO_DIAG
+         case M_AUDTASK:   return aspMain_ps2_diag;
+@@ -159,6 +179,10 @@
+         svcSleepThread(2000000000LL);
+         if (!g_tpak_run) break;   // exit already flushing (D7 A5)
+         tpak::flush_all();
++        if (g_gb_map && svcGetSystemTick() - g_gb_task_tick > SYSCLOCK_ARM11) {   // left the GB Tower
++            g_gb_map = false;
++            input_set_map(kButtons, sizeof(kButtons) / sizeof(kButtons[0]));
++        }
+         static uint32_t last = 0;   // boot-hang diagnosis: where the game loops
+         const uint32_t pc = s2_last_loop_pc;
+         fprintf(stderr, "[S2] loop pc %08lX%s\n", (unsigned long)pc, pc == last ? " (same)" : "");

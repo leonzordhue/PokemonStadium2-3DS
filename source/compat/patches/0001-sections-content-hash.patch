@@ -1,0 +1,12 @@
+--- a/librecomp/include/librecomp/sections.h	2026-11-19 15:13:24.677102931 -0400
++++ b/librecomp/include/librecomp/sections.h	2026-11-19 15:13:24.688410746 -0400
+@@ -43,6 +43,9 @@
+     RelocEntry* relocs;
+     size_t num_relocs;
+     size_t index;
++    // Pokemon Stadium 2 (fork mstan/michiiik): variantes de fragmento por padrão.
++    uint64_t content_hash;
++    uint32_t original_pattern_id;
+ } SectionTableEntry;
+ 
+ typedef struct {

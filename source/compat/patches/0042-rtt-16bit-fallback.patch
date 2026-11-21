@@ -1,0 +1,35 @@
+diff -ruN a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp
+--- a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp	2026-11-20 15:12:32.644518295 -0400
++++ b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp	2026-11-20 15:12:32.673669695 -0400
+@@ -4114,19 +4114,23 @@
+             // back (free three frames on) and keeps it free; again every four
+             // frames the target still fails.
+             const uint32_t need = (uint32_t)img.pot_w * img.pot_h * 8;   // RGBA8 + D24S8
+-            if (!C3D_TexInitVRAM(&t.tex, img.pot_w, img.pot_h, GPU_RGBA8)) {
++            // D42 (nexus): short of VRAM for RGBA8 + D24S8 (a 512x512 target is
++            // 2 MB; Stadium 2's VS screen on the console had 1464 KB), the
++            // N64's own 16-bit colour and depth: RGBA5551 + D16, half the size.
++            bool made = false;
++            for (int half = 0; half < 2 && !made; half++) {
++                if (!C3D_TexInitVRAM(&t.tex, img.pot_w, img.pot_h, half ? GPU_RGBA5551 : GPU_RGBA8)) continue;
++                t.rt = C3D_RenderTargetCreateFromTex(&t.tex, GPU_TEXFACE_2D, 0, half ? GPU_RB_DEPTH16 : GPU_RB_DEPTH24_STENCIL8);
++                if (t.rt == nullptr) { C3D_TexDelete(&t.tex); continue; }
++                made = true;
++                if (half) fprintf(stderr, "rt64-3ds: render texture %d at 16 bits (RGBA5551 + D16) for VRAM\n", i);
++            }
++            if (!made) {
+                 if (frames_ - rtt_room_frame_ >= 4) { textures_.make_vram_room(need); rtt_room_frame_ = frames_; }
+                 if (++rtt_no_vram_ <= 5 || (rtt_no_vram_ & 255) == 0)
+                     fprintf(stderr, "rt64-3ds: no VRAM for a %ux%u render texture (%u times)\n", (unsigned)img.pot_w, (unsigned)img.pot_h, (unsigned)rtt_no_vram_);
+                 return nullptr;
+             }
+-            t.rt = C3D_RenderTargetCreateFromTex(&t.tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH24_STENCIL8);
+-            if (t.rt == nullptr) {
+-                C3D_TexDelete(&t.tex);
+-                if (frames_ - rtt_room_frame_ >= 4) { textures_.make_vram_room(need); rtt_room_frame_ = frames_; }
+-                fprintf(stderr, "rt64-3ds: render target for a %ux%u texture failed\n", (unsigned)img.pot_w, (unsigned)img.pot_h);
+-                return nullptr;
+-            }
+             t.w = img.pot_w; t.h = img.pot_h;
+             C3D_TexSetFilter(&t.tex, GPU_LINEAR, GPU_LINEAR);
+             C3D_TexSetWrap(&t.tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);

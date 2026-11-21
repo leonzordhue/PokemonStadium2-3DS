@@ -1,0 +1,34 @@
+diff --git a/librecomp/include/librecomp/rsp.hpp b/librecomp/include/librecomp/rsp.hpp
+index 748558c..b1cce5a 100644
+--- a/librecomp/include/librecomp/rsp.hpp
++++ b/librecomp/include/librecomp/rsp.hpp
+@@ -16,10 +16,15 @@ enum class RspExitReason {
+     UnhandledJumpTarget,
+     Unsupported,
+     SwapOverlay,
+-    UnhandledResumeTarget
++    UnhandledResumeTarget,
++    Watchdog // s2-3ds: GB Tower ucodes come from the mstan RSPRecomp fork
+ };
+ 
+ struct RspContext {
++    // s2-3ds: fields the mstan-fork RSPRecomp output touches (GB Tower ucodes).
++    uint64_t watchdog_count;
++    uint32_t pc_trail_idx;
++    uint32_t pc_trail[32];
+     uint32_t      r1,  r2,  r3,  r4,  r5,  r6,  r7,
+              r8,  r9,  r10, r11, r12, r13, r14, r15,
+              r16, r17, r18, r19, r20, r21, r22, r23,
+@@ -32,6 +37,12 @@ struct RspContext {
+     bool resume_delay;
+ };
+ 
++// s2-3ds: fork hooks as no-ops. ponytail: SP_STATUS mirror ignored; implement if GB Tower hangs waiting on SP signals.
++namespace recomp { namespace rsp { inline void run_pre_task_hook(uint8_t*, RspContext*, const char*, uint32_t) {} } }
++#define WRITE_SP_STATUS(val) ((void)(val))
++#ifndef RSP_WATCHDOG_THRESHOLD
++#define RSP_WATCHDOG_THRESHOLD 100000000ull
++#endif
+ using RspUcodeFunc = RspExitReason(uint8_t* rdram, uint32_t ucode_addr);
+ 
+ extern uint8_t dmem[];

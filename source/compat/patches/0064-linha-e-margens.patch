@@ -1,0 +1,113 @@
+diff -ruN a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds.h b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds.h
+--- a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds.h	2026-11-21 03:37:49.045313800 +0000
++++ b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds.h	2026-11-21 03:37:49.046818100 +0000
+@@ -192,6 +192,17 @@
+     // the wide screen and kept on the screen plane, as full-screen rectangles
+     // are; a texture keeps its texel size (stereo's stretch_tint_quad).
+     bool stretch_tint_quads = false;
++    // A bar at most four pixels wide, untextured, on an edge of the 4:3
++    // frame and as tall as it (Pokemon Stadium 2's camera wipe leaves a
++    // black one at x -1.5..0.5 through the Poke Ball's opening, where the
++    // TV's overscan hid it) is dropped: on the wide screen it showed as a
++    // black line at the margin's edge (stereo's edge_bar).
++    bool drop_edge_bars = false;
++    // Each side of a scissor on that edge of the 4:3 frame opens to the wide
++    // screen's edge, not only a scissor covering the whole frame (Pokemon
++    // Stadium 2's camera wipe splits the frame in two scissors, [0, x] and
++    // [x, 320]: neither opened, and the margins showed the clear colour).
++    bool scissor_edges_wide = false;
+     // Plain-origin rectangles of one run of rectangles (no triangles between
+     // them, one colour image) that share their rows (uly, lry) and together
+     // reach both edges of the frame are stretched over the wide screen like
+diff -ruN a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp
+--- a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp	2026-11-21 03:37:49.074863700 +0000
++++ b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp	2026-11-21 03:37:49.075860900 +0000
+@@ -3182,6 +3182,10 @@
+         // The original game's own full-width scissor is stretched to the wide
+         // screen: the patched projection already fills it.
+         if (d.scissor[0] <= 0 && d.scissor[2] >= geo_.w) { x0 = 0; x1 = 400; }
++        else if (rt64_3ds::render_desc().scissor_edges_wide) {   // D61 (nexus)
++            if (d.scissor[0] <= 0) x0 = 0;
++            if (d.scissor[2] >= geo_.w) x1 = 400;
++        }
+         if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > 400) x1 = 400; if (y1 > 240) y1 = 240;
+         // Mtx_OrthoTilt maps screen y = 0 to framebuffer x = 240 and the
+         // screen's left edge to framebuffer y = 400: both axes run backwards.
+@@ -3897,6 +3901,16 @@
+                 if (frame_.draws[i].screen == 0 && rt64_3ds::stretch_tint_quad(frame_.draws[i], frame_.verts.data(), geo_)) tint_[i] = 1;
+             }
+         }
++        // RenderDesc::drop_edge_bars (D52g, nexus): the bar's vertices
++        // collapse onto its first, so its triangles cover no pixel.
++        if (desc.drop_edge_bars) {
++            rt64_3ds::Vtx3ds* vs = frame_.verts.data();
++            for (size_t i = 0; i < frame_.draws.size(); i++) {
++                const rt64_3ds::DrawRecord& d = frame_.draws[i];
++                if (!rt64_3ds::edge_bar(d, vs, geo_)) continue;
++                for (uint32_t k = d.first + 1; k < d.first + d.count; k++) vs[k] = vs[d.first];
++            }
++        }
+         if (!sf.on) return;
+         const rt64_3ds::Vtx3ds* verts = frame_.verts.data();
+         // RenderDesc::infinity_rect_cover_zoom. The vertices are recorded
+diff -ruN a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_stereo.cpp b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_stereo.cpp
+--- a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_stereo.cpp	2026-11-21 03:37:49.060830100 +0000
++++ b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_stereo.cpp	2026-11-21 03:37:49.061830300 +0000
+@@ -276,6 +276,23 @@
+     return true;
+ }
+ 
++bool edge_bar(const DrawRecord& d, const Vtx3ds* verts, const ScreenGeometry& geo) {
++    if (d.kind != DrawRecord::Tris || d.count == 0 || d.count > 6 || d.rtt >= 0 || d.screen != 0) return false;
++    if (d.tex[0].valid || d.tex[1].valid) return false;
++    float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
++    for (uint32_t i = d.first; i < d.first + d.count; i++) {
++        const Vtx3ds& v = verts[i];
++        if (!(v.w > 0.0f)) return false;
++        const float x = v.x / v.w, y = v.y / v.w;
++        x0 = std::min(x0, x); x1 = std::max(x1, x); y0 = std::min(y0, y); y1 = std::max(y1, y);
++    }
++    const float w = (float)geo.w, h = (float)geo.h;
++    if (x1 - x0 > kEdgeBarWidth || y1 - y0 < 0.9f * h) return false;
++    const bool left = x0 >= -kEdgeBarWidth && x1 <= kEdgeBarWidth;
++    const bool right = x0 >= w - kEdgeBarWidth && x1 <= w + kEdgeBarWidth;
++    return left || right;
++}
++
+ bool rect_covers_frame(const DrawRecord& d, const Vtx3ds* verts, int frame_w, int frame_h) {
+     float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+     for (uint32_t i = d.first; i < d.first + d.count; i++) {
+diff -ruN a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_stereo.h b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_stereo.h
+--- a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_stereo.h	2026-11-21 03:37:49.050829600 +0000
++++ b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_stereo.h	2026-11-21 03:37:49.051828400 +0000
+@@ -108,6 +108,13 @@
+ constexpr float kTintQuadMargin = 12.0f;
+ bool stretch_tint_quad(const DrawRecord& d, Vtx3ds* verts, const ScreenGeometry& geo);
+ 
++// RenderDesc::drop_edge_bars: triangles (at most two), untextured, on the
++// screen, whose bounds are at most kEdgeBarWidth N64 pixels wide, lie
++// within that of the frame's left or right edge, and cover at least
++// nine tenths of its height.
++constexpr float kEdgeBarWidth = 4.0f;
++bool edge_bar(const DrawRecord& d, const Vtx3ds* verts, const ScreenGeometry& geo);
++
+ // Positive view distance of a depth sample z' (= (ndc z + 1) / 2) under the
+ // world projection's m[2][2] and m[3][2]; <= 0 when invalid.
+ float view_depth(float zp, float m22, float m32);
+diff -ruN a/s2-3ds/platform/3ds/main_3ds.cpp b/s2-3ds/platform/3ds/main_3ds.cpp
+--- a/s2-3ds/platform/3ds/main_3ds.cpp	2026-11-21 03:37:49.084371500 +0000
++++ b/s2-3ds/platform/3ds/main_3ds.cpp	2026-11-21 03:37:49.085373900 +0000
+@@ -307,6 +307,13 @@
+     // quad drawn as triangles: unstretched, it covered the 320-wide frame
+     // and left the wide screen's margins showing the field (a white box).
+     desc.render.stretch_tint_quads = true;
++    // D52g (nexus): the camera wipe's black bar at the frame's left edge
++    // (x -1.5..0.5, hidden by the TV's overscan) showed as a line at the
++    // margin through the Poke Ball's opening.
++    desc.render.drop_edge_bars = true;
++    // D61 (nexus): the wipe's two scissors open to the wide screen's
++    // edges (the margins showed the clear colour for its frames).
++    desc.render.scissor_edges_wide = true;
+     desc.render.render_to_texture = true;   // photos and the GB Tower screen are drawn into images
+     desc.render.crosshair_row = false;
+     desc.render.eye_depth16 = true;

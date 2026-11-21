@@ -1,0 +1,78 @@
+diff -ruN a/lib/N64ModernRuntime/librecomp/src/recomp.cpp b/lib/N64ModernRuntime/librecomp/src/recomp.cpp
+--- a/lib/N64ModernRuntime/librecomp/src/recomp.cpp	2026-11-20 19:08:57.762370164 -0400
++++ b/lib/N64ModernRuntime/librecomp/src/recomp.cpp	2026-11-20 19:08:57.763921964 -0400
+@@ -264,7 +264,52 @@
+     return total != 0 && hash == expected_hash;
+ }
+ 
++#ifdef __3DS__
++extern "C" int32_t archive_getmtime(const char* name, uint64_t* mtime);   // libctru 3ds/archive.h
++
++// P46 (proton): the full hash reads the whole ROM from the SD card (64 MB,
++// ~10 s on the console). A ROM that passed once leaves a stamp beside it
++// (size, mtime, the header's CRC1/CRC2 and the expected hash); the next boots
++// trust a ROM whose stamp still matches and skip the read.
++static std::string rom_stamp(const std::filesystem::path& path, uint64_t expected_hash) {
++    std::ifstream file{ path, std::ios::binary };
++    if (!file.good()) {
++        return {};
++    }
++    file.seekg(0, std::ios::end);
++    const uint64_t size = (uint64_t)file.tellg();
++    unsigned char crc[8] = {};
++    file.seekg(0x10, std::ios::beg);
++    file.read(reinterpret_cast<char*>(crc), sizeof(crc));
++    if (file.gcount() != (std::streamsize)sizeof(crc)) {
++        return {};
++    }
++    uint64_t mtime = 0;
++    archive_getmtime(path.string().c_str(), &mtime);
++    char stamp[128];
++    snprintf(stamp, sizeof(stamp), "%016llx %llx %llx %02x%02x%02x%02x%02x%02x%02x%02x", (unsigned long long)expected_hash,
++             (unsigned long long)size, (unsigned long long)mtime, crc[0], crc[1], crc[2], crc[3], crc[4], crc[5], crc[6], crc[7]);
++    return stamp;
++}
++#endif
++
+ bool check_stored_rom(const recomp::GameEntry& game_entry) {
++#ifdef __3DS__
++    const std::filesystem::path rom_path = config_path / game_entry.stored_filename();
++    std::filesystem::path ok_path = rom_path;
++    ok_path += ".ok";
++    const std::string stamp = rom_stamp(rom_path, game_entry.rom_hash);
++    if (!stamp.empty()) {
++        std::ifstream ok_file{ ok_path };
++        std::string saved;
++        std::getline(ok_file, saved);
++        if (saved == stamp) {
++            fprintf(stderr, "recomp3ds: ROM check: stamp matches (%s), full hash skipped\n", ok_path.string().c_str());
++            return true;
++        }
++    }
++    fprintf(stderr, "recomp3ds: ROM check: hashing the whole ROM (first boot or ROM changed)\n");
++#endif
+     if (!check_file_hash(config_path / game_entry.stored_filename(), game_entry.rom_hash)) {
+ #ifndef __3DS__
+         // Incorrect hash, remove the stored ROM file if it exists.
+@@ -275,6 +320,12 @@
+         return false;
+     }
+ 
++#ifdef __3DS__
++    if (!stamp.empty()) {
++        std::ofstream ok_file{ ok_path };
++        ok_file << stamp << "\n";
++    }
++#endif
+     return true;
+ }
+ 
+@@ -286,6 +337,8 @@
+ 
+ void recomp::check_all_stored_roms() {
+     for (const auto& cur_rom_entry: game_roms) {
++        // P46: recomp3ds::run checks before recomp::start checks again; once is enough.
++        if (valid_game_roms.contains(cur_rom_entry.first)) continue;
+         if (check_stored_rom(cur_rom_entry.second)) {
+             valid_game_roms.insert(cur_rom_entry.first);
+         }

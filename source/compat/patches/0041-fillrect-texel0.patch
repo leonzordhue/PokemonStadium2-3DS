@@ -1,0 +1,42 @@
+diff -ruN a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp
+--- a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp	2026-11-20 15:08:19.238681359 -0400
++++ b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp	2026-11-20 15:08:19.256268759 -0400
+@@ -1400,6 +1400,12 @@
+             flush_dcache(white_.data, 8 * 8 * 2);
+             C3D_TexSetFilter(&white_, GPU_NEAREST, GPU_NEAREST);
+         }
++        // D40 (nexus): its transparent black twin, for fill rects sampling TEXEL0.
++        if (C3D_TexInit(&clear_, 8, 8, GPU_RGBA5551)) {
++            memset(clear_.data, 0, 8 * 8 * 2);
++            flush_dcache(clear_.data, 8 * 8 * 2);
++            C3D_TexSetFilter(&clear_, GPU_NEAREST, GPU_NEAREST);
++        }
+ 
+         // The snapshot texture: the 240x400 colour buffer copied whole into
+         // a 256x512 RGBA8 texture (same tiling, rows padded), for the game's
+@@ -3008,9 +3014,14 @@
+                     bound = true;
+                 }
+             }
+-            if (!bound && last_tex_[t] != &white_) {
+-                C3D_TexBind(t, &white_);
+-                last_tex_[t] = &white_; last_tex_param_[t] = 0xFFFFFFFFu;
++            // D40 (nexus): a fill rect drawn in 1/2-cycle mode with no texture
++            // loaded samples TEXEL0 as 0 (dl_test's reference does; Stadium 2's
++            // battle panels' borders are TEXEL0*PRIM rects, invisible on the N64
++            // and solid white with white_).
++            C3D_Tex* none = (!d.tex[t].valid && d.kind == rt64_3ds::DrawRecord::FillRect && clear_.data != nullptr) ? &clear_ : &white_;
++            if (!bound && last_tex_[t] != none) {
++                C3D_TexBind(t, none);
++                last_tex_[t] = none; last_tex_param_[t] = 0xFFFFFFFFu;
+             }
+         }
+         if (us != last_us_ || vs != last_vs_) {
+@@ -4900,6 +4911,7 @@
+     uint8_t* capture_copy_ = nullptr;
+     OSTask capture_task_{};
+     C3D_Tex white_{};
++    C3D_Tex clear_{};     // D40: transparent 8x8, see apply_state
+     C3D_Tex snapshot_[rt64_3ds::kMaxSnapshots]{};
+     int last_snap_slot_ = 0;                // the slot copy_snapshot_to last filled (verify_snapshot)
+     uint32_t snapshots_ = 0;

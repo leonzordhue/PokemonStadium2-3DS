@@ -1,0 +1,770 @@
+diff --git a/src/platform/log.cpp b/src/platform/log.cpp
+index b97fe8c..8e7c9c1 100644
+--- a/src/platform/log.cpp
++++ b/src/platform/log.cpp
+@@ -105,9 +105,13 @@ bool drain_ring() {
+ volatile bool g_sync_request = false;
+ 
+ void writer_thread(void*) {
++    u64 last_sync = svcGetSystemTick();
+     while (g_writer_run) {
+-        drain_ring();
++        // Azahar keeps the last write in its host buffer until a flush; a test
++        // killed by rodar_teste.py lost that tail (P25). One flush a second.
++        if (drain_ring() && svcGetSystemTick() - last_sync > SYSCLOCK_ARM11) g_sync_request = true;
+         if (g_sync_request && g_file != nullptr) {
++            last_sync = svcGetSystemTick();
+             g_sync_request = false;
+             g_write_since = svcGetSystemTick() | 1;
+             fsync(fileno(g_file));
+@@ -172,6 +176,7 @@ ssize_t stderr_write(struct _reent* r, void* fd, const char* ptr, size_t len) {
+ const devoptab_t* g_screen = nullptr;
+ LightLock g_screen_lock;
+ volatile bool g_screen_dirty = false;   // the console drew since screen_flush
++volatile bool g_screen_taken = false;   // recomp3ds::screen_take: the game draws the touch screen
+ 
+ // Who has the touch screen (screen_bottom_update): the console, writing its
+ // framebuffer, or the renderer, drawing the game's HUD there with the
+@@ -226,6 +231,18 @@ void recomp3ds::log_init(const char* base_path) {
+     LightLock_Init(&g_ring_lock);
+     char path[192];
+     snprintf(path, sizeof(path), "%s/log.txt", base_path);
++    {
++        // D48 (nexus): the last two runs' logs kept as log-1.txt and log-2.txt
++        // (a run that crashed, or one the player only reports after starting
++        // the game again, is not written over). FAT's rename refuses an
++        // existing target: the oldest goes first.
++        char older[192], old1[192];
++        snprintf(older, sizeof(older), "%s/log-2.txt", base_path);
++        snprintf(old1, sizeof(old1), "%s/log-1.txt", base_path);
++        remove(older);
++        rename(old1, older);
++        rename(path, old1);
++    }
+     g_file = fopen(path, "w");
+     // 3dslink owns stdout and stderr through its own socket devoptab; leave
+     // that alone.
+@@ -307,7 +324,7 @@ void recomp3ds::screen_printf(const char* fmt, ...) {
+     va_start(ap, fmt);
+     int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+     va_end(ap);
+-    if (n <= 0 || g_screen == nullptr) return;
++    if (n <= 0 || g_screen == nullptr || g_screen_taken) return;
+     if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
+     LightLock_Lock(&g_screen_lock);
+     g_screen->write_r(_REENT, nullptr, buf, (size_t)n);
+@@ -323,7 +340,7 @@ void recomp3ds::screen_printf(const char* fmt, ...) {
+ // when the main thread that does both otherwise may be the one stuck.
+ // Skipped while another thread holds the console.
+ void recomp3ds::screen_alert(const char* text, int row) {
+-    if (g_screen == nullptr || LightLock_TryLock(&g_screen_lock) != 0) return;
++    if (g_screen == nullptr || g_screen_taken || LightLock_TryLock(&g_screen_lock) != 0) return;
+     char buf[64];
+     const int n = snprintf(buf, sizeof(buf), "\x1b[%d;0H\x1b[31m%-39.39s\x1b[0m", row, text);
+     g_screen->write_r(_REENT, nullptr, buf, (size_t)n);
+@@ -350,6 +367,9 @@ uint32_t recomp3ds::log_write_stuck_ms() {
+ // kernel's flush on this core (gfxFlushBuffers asks the GSP module on core
+ // 1, and the renderer's frame end no longer flushes the whole linear heap).
+ // The same for the copy the renderer's GPU reads, then the renderer is told.
++void recomp3ds::screen_take(bool taken) { g_screen_taken = taken; }
++bool recomp3ds::screen_taken() { return g_screen_taken; }
++
+ void recomp3ds::screen_flush() {
+     if (!g_screen_dirty) return;
+     g_screen_dirty = false;
+diff --git a/src/platform/recomp3ds.h b/src/platform/recomp3ds.h
+index 7c2b6bb..da29aa1 100644
+--- a/src/platform/recomp3ds.h
++++ b/src/platform/recomp3ds.h
+@@ -262,6 +262,19 @@ int run(const GameDesc& desc);
+ // Ask the runtime to shut the game down (from the HOME prompt or a script).
+ void request_exit();
+ 
++// While taken, the console (menu rows, stats line, alerts) does not write the
++// touch screen: the game draws there itself (Pokemon Stadium 2's Game Pak screen).
++void screen_take(bool taken);
++bool screen_taken();
++
++// Open the touch-screen settings menu on a page, or close it, from any thread
++// (the main thread does it on its next update); and whether it is open.
++// For a game that holds its start on a menu page (Pokemon Stadium 2's Game Pak
++// screen, as the S1 does before its game starts).
++void settings_menu_request_open(MenuPage page);
++void settings_menu_request_close();
++bool settings_menu_is_open();
++
+ // sdmc:/3ds/<sd_dir>
+ const char* base_path();
+ 
+diff --git a/src/platform/recomp3ds_run.cpp b/src/platform/recomp3ds_run.cpp
+index 97ea798..f78e709 100644
+--- a/src/platform/recomp3ds_run.cpp
++++ b/src/platform/recomp3ds_run.cpp
+@@ -15,6 +15,7 @@
+ 
+ #include "librecomp/addresses.hpp"
+ namespace recomp { uint32_t heap_rdram_address() __attribute__((weak)); }
++namespace rt64_3ds { void p19_take(uint32_t out[4]); }   // P19 (rt64_3ds_context.cpp)
+ #include "librecomp/game.hpp"
+ #include "librecomp/rsp.hpp"
+ #ifdef RECOMP_STATIC_MODS
+@@ -883,6 +884,15 @@ void update_gfx_inner() {
+                 st.dl_per_sec, want_fps, st.late_frames, st.max_gap_ms, busy0, busy1, core2, core3, ucode_ms, ucode_tasks, recomp3ds::audio_frames_queued(),
+                 (unsigned long)ac.submitted, (unsigned long)ac.rate, (unsigned long)ac.underruns, (unsigned long)ac.dropped, (unsigned long)(ac.low_water == 0xFFFFFFFFu ? 0u : ac.low_water),
+                 (unsigned long)(mallinfo().arena / 1024), rheap, hle_stats, hle_ms.c_str(), preempt_stats, rom_stats, game_stats, thread_stats.c_str());
++        // P19: gfx tasks over this interval, on a line of its own (the stats
++        // line is near the log's 512-character cut). Taken every second
++        // whatever the log level, so each line covers one interval only.
++        {
++            uint32_t p19[4];
++            rt64_3ds::p19_take(p19);
++            if (log_stats) fprintf(stderr, "stats: p19 gfx recv %lu drawn %lu notdrawn %lu passedover %lu in %lu ms\n", (unsigned long)p19[0], (unsigned long)p19[1],
++                                   (unsigned long)p19[2], (unsigned long)p19[3], (unsigned long)(interval * 1000 / SYSCLOCK_ARM11));
++        }
+         // On a line of its own: the log cuts lines at 512 characters.
+         if (log_stats && dsp_stats[0] != '\0') fprintf(stderr, "%s\n", dsp_stats + 1);
+         // dbg_profile 2 or 3: the game's hottest functions, every 10 s whatever the log level.
+@@ -1445,6 +1455,13 @@ int recomp3ds::run(const GameDesc& desc) {
+             Thread probe3 = threadCreate([](void*) {}, nullptr, 4096, 0x30, 3, false);
+             fprintf(stderr, "recomp3ds: a thread on core 3: %s\n", probe3 != nullptr ? "created" : "refused");
+             if (probe3 != nullptr) { threadJoin(probe3, UINT64_MAX); threadFree(probe3); g_core3 = true; g_watch_cores |= 0x8; }
++            // P48 [Proton]: the audio task on core 3 when the system lets the application run there
++            // (a .3dsx; a CIA is refused and keeps core 1). Stadium 2: core 1 saturated in battle by
++            // the audio ucode while core 3 sat idle (proton/P48-batalha.md).
++            if (g_core3 && core2 && g_sp_core == 1) {
++                g_sp_core = 3;
++                fprintf(stderr, "recomp3ds: P48: audio task on core 3\n");
++            }
+         }
+         // The renderer's own core-1 helper (the in-between builder) is a
+         // New 3DS's extra: none when core 2 is left out.
+diff --git a/src/platform/settings_menu.cpp b/src/platform/settings_menu.cpp
+index d8da22d..782e280 100644
+--- a/src/platform/settings_menu.cpp
++++ b/src/platform/settings_menu.cpp
+@@ -1066,6 +1066,12 @@ void recomp3ds::settings_menu_toggle() {
+ 
+ void recomp3ds::settings_menu_redraw() { g_redraw = true; }
+ 
++// -1 none, -2 close, else the page to open on (settings_menu_update carries it out).
++static volatile int g_menu_request = -1;
++void recomp3ds::settings_menu_request_open(MenuPage page) { g_menu_request = page; }
++void recomp3ds::settings_menu_request_close() { g_menu_request = -2; }
++bool recomp3ds::settings_menu_is_open() { return g_open; }
++
+ u32 recomp3ds::settings_menu_keys() {
+     return g_open ? (KEY_DUP | KEY_DDOWN | KEY_DLEFT | KEY_DRIGHT) : 0;
+ }
+@@ -1073,10 +1079,19 @@ u32 recomp3ds::settings_menu_keys() {
+ // Called ~60 times a second from the main thread.
+ void recomp3ds::settings_menu_update() {
+     static u32 prev = 0;
++    if (const int req = g_menu_request; req != -1) {
++        g_menu_request = -1;
++        if (req == -2) { if (g_open) settings_menu_toggle(); }
++        else { if (!g_open) settings_menu_toggle(); set_page(req); }
++    }
+     static u64 next_repeat = 0;
+     static int ticks = 0;
+     // The game scans the pad only while it polls it (not during loads).
+     const PadScan scan = input_scan_main();
++    // P44b/P44c: the game draws the touch screen (Game Pak screen): the pad is
++    // scanned above (that screen reads it), but no menu, HUD or touch pad is
++    // painted over it (that flickered on the console).
++    if (recomp3ds::screen_taken()) { prev = scan.held; return; }
+     const u32 keys = scan.held | autotest_keys();
+     const u64 now = svcGetSystemTick();
+     // The touch screen: the game's HUD there while the menu is closed.
+diff --git a/src/renderer/rt64_3ds.h b/src/renderer/rt64_3ds.h
+index eb134f9..eed89e0 100644
+--- a/src/renderer/rt64_3ds.h
++++ b/src/renderer/rt64_3ds.h
+@@ -192,6 +192,23 @@ struct RenderDesc {
+     // the wide screen and kept on the screen plane, as full-screen rectangles
+     // are; a texture keeps its texel size (stereo's stretch_tint_quad).
+     bool stretch_tint_quads = false;
++    // A bar at most four pixels wide, untextured, on an edge of the 4:3
++    // frame and as tall as it (Pokemon Stadium 2's camera wipe leaves a
++    // black one at x -1.5..0.5 through the Poke Ball's opening, where the
++    // TV's overscan hid it) is dropped: on the wide screen it showed as a
++    // black line at the margin's edge (stereo's edge_bar).
++    bool drop_edge_bars = false;
++    // Each side of a scissor on that edge of the 4:3 frame opens to the wide
++    // screen's edge, not only a scissor covering the whole frame (Pokemon
++    // Stadium 2's camera wipe splits the frame in two scissors, [0, x] and
++    // [x, 320]: neither opened, and the margins showed the clear colour).
++    bool scissor_edges_wide = false;
++    // A fill rectangle (G_FILLRECT) whose side lies on the 4:3 frame's left
++    // or right edge has that side moved to the wide screen's edge: Pokemon
++    // Stadium 2's iris closes as four black fill rectangles, one per
++    // quarter of the frame, which on the TV covered the screen; on the wide
++    // screen they left the margins showing the field (a black square).
++    bool widen_edge_fills = false;
+     // Plain-origin rectangles of one run of rectangles (no triangles between
+     // them, one colour image) that share their rows (uly, lry) and together
+     // reach both edges of the frame are stretched over the wide screen like
+@@ -298,6 +315,18 @@ struct RenderDesc {
+     // every frame) clears the eyes to its colour instead of drawing it: one
+     // full screen of fragments less per eye, the same pixels.
+     bool fill_clear = false;
++    // keep_unfilled: a frame that does not start with a full-screen fill
++    // keeps the eyes' colour from the frame before (only depth is cleared),
++    // as the N64's framebuffer keeps it: for games that draw a menu's
++    // background once and then redraw only what changes (Pokemon Stadium 2's
++    // team selection). Off: every frame starts from a cleared screen.
++    bool keep_unfilled = false;
++    // full_width_on_screen: a colour image as wide as the frame is a
++    // framebuffer even before the VI has shown it (Pokemon Stadium 2 starts
++    // three new 320-wide ones at its battle; drawn off screen, their first
++    // frames were lost and the old 640x480 picture stayed). Off: unknown
++    // images are off screen once two framebuffers are known.
++    bool full_width_on_screen = false;
+     // double_eyes (gpu_double_eyes), with frame_interpolation: the
+     // in-between frames get eye targets of their own (two more 240x400
+     // colour + depth buffers: 1125 KB of VRAM at RGBA8/D16, taken last and
+diff --git a/src/renderer/rt64_3ds_context.cpp b/src/renderer/rt64_3ds_context.cpp
+index 5914095..4c043e1 100644
+--- a/src/renderer/rt64_3ds_context.cpp
++++ b/src/renderer/rt64_3ds_context.cpp
+@@ -34,6 +34,16 @@ extern "C" void C3Di_UpdateContext(void);
+ extern "C" bool C3Di_SplitFrame(u32** pBuf, u32* pSize);
+ extern "C" void C3Di_RenderQueueWaitDone(void);   // citro3d (internal, exported): waits out every frame queued
+ 
++// P19 (temporary diagnostics): gfx tasks since the last stats line, by what
++// became of them: received (send_dl), Drawn, NotDrawn, PassedOver
++// (tell_parsed). Taken and zeroed by the platform's once-a-second report.
++namespace rt64_3ds {
++std::atomic<uint32_t> p19_counts[4];
++void p19_take(uint32_t out[4]) {
++    for (int i = 0; i < 4; i++) out[i] = p19_counts[i].exchange(0, std::memory_order_relaxed);
++}
++}
++
+ namespace {
+ 
+ constexpr uint32_t kVboVerts = 65536;
+@@ -474,6 +484,7 @@ public:
+     float get_resolution_scale() const override { return 1.0f; }
+ 
+     void send_dl(const OSTask* task) override {
++        rt64_3ds::p19_counts[0].fetch_add(1, std::memory_order_relaxed);   // P19: received, before any early return
+         if (!ok_ || g_quitting) return;
+         // Hold the game while the GPU is away (it would only run ahead unseen)
+         // or a prompt has it paused.
+@@ -796,6 +807,10 @@ public:
+             g_stats.late_frames = (int)late_;
+             g_stats.max_gap_ms = max_gap_;
+             late_ = 0;
++            if (rtt_failed_ || rtt_sampled_missing_ || rtt_freed_)
++                fprintf(stderr, "rt64-3ds: rtt this second: %u failed, %u draws sampled a missing one, %u freed idle; VRAM free %u KB\n",
++                        (unsigned)rtt_failed_, (unsigned)rtt_sampled_missing_, (unsigned)rtt_freed_, (unsigned)(vramSpaceFree() / 1024));
++            rtt_failed_ = rtt_sampled_missing_ = rtt_freed_ = 0;
+             max_gap_ = 0;
+             // Times per list drawn (the frame cap's passed-over lists apart).
+             const uint32_t drawn = dl_count_ - passed_count_;
+@@ -1144,6 +1159,8 @@ public:
+         return present ? ReadOutcome::Drawn : ReadOutcome::NotDrawn;
+     }
+     void tell_parsed(uint32_t data_ptr, ReadOutcome read) {
++        // P19: 1 Drawn, 2 NotDrawn, 3 PassedOver (both read paths end here).
++        rt64_3ds::p19_counts[read == ReadOutcome::Drawn ? 1 : read == ReadOutcome::NotDrawn ? 2 : 3].fetch_add(1, std::memory_order_relaxed);
+         ultramodern::extensions::on_displaylist_parsed(data_ptr);
+         // RenderDesc::early_drawn: and drawn, so a game that waits for that
+         // before its next frame does not wait for the screen below too. With
+@@ -1387,6 +1404,12 @@ private:
+             flush_dcache(white_.data, 8 * 8 * 2);
+             C3D_TexSetFilter(&white_, GPU_NEAREST, GPU_NEAREST);
+         }
++        // D40 (nexus): its transparent black twin, for fill rects sampling TEXEL0.
++        if (C3D_TexInit(&clear_, 8, 8, GPU_RGBA5551)) {
++            memset(clear_.data, 0, 8 * 8 * 2);
++            flush_dcache(clear_.data, 8 * 8 * 2);
++            C3D_TexSetFilter(&clear_, GPU_NEAREST, GPU_NEAREST);
++        }
+ 
+         // The snapshot texture: the 240x400 colour buffer copied whole into
+         // a 256x512 RGBA8 texture (same tiling, rows padded), for the game's
+@@ -1466,6 +1489,7 @@ private:
+             }
+             interp_.set_gbi(desc.gbi);
+             interp_.set_render_to_texture(desc.render_to_texture);
++            interp_.set_full_width_on_screen(desc.full_width_on_screen);
+             interp_.set_sample_drawn_frame(desc.sample_drawn_frame);
+             interp_.set_primary_world_instance(desc.primary_world_instance);
+             interp_.set_unify_world_depth(desc.unify_world_depth);
+@@ -1663,8 +1687,12 @@ private:
+         // rectangle becomes the eyes' clear value, and is not drawn.
+         u32 clear_value = eye_clear_;
+         const int fill_skip = (!offscreen_frame && fill_clear_) ? leading_fill(sfd, &clear_value) : -1;
++        // RenderDesc::keep_unfilled: no leading full-screen fill, keep the colour.
++        u32 unused_value = 0;
++        const C3D_ClearBits eye_clear_bits = (!rt64_3ds::render_desc().keep_unfilled || fill_skip >= 0
++            || (!fill_clear_ && leading_fill(sfd, &unused_value) >= 0)) ? C3D_CLEAR_ALL : C3D_CLEAR_DEPTH;
+         if (!offscreen_frame) {
+-            clear_target(cur_eye_[0], C3D_CLEAR_ALL, clear_value);
++            clear_target(cur_eye_[0], eye_clear_bits, clear_value);
+             draw_on(cur_eye_[0]);
+         }
+         cur_target_ = offscreen_frame ? -2 : -1;
+@@ -1726,7 +1754,7 @@ private:
+         if (pass == 1) {
+             // The right eye: same records, same state, the other shift.
+             tl_split = svcGetSystemTick();
+-            clear_target(cur_eye_[1], C3D_CLEAR_ALL, clear_value);
++            clear_target(cur_eye_[1], eye_clear_bits, clear_value);
+             draw_on(cur_eye_[1]);
+             cur_target_ = -1;
+             frame_viewport_ = false;
+@@ -2960,7 +2988,19 @@ private:
+             else if (d.tex[t].valid && d.tex[t].rtt >= 0) {
+                 // An off-screen image drawn on the GPU (this frame or earlier).
+                 RttTarget& rt = rtt_[d.tex[t].rtt];
+-                if (rt.rt != nullptr) {
++                if (rt.rt == nullptr && clear_.data != nullptr) {
++                    // D50 (nexus): an image whose target got no VRAM samples
++                    // transparent, not white_ (the console's white screens:
++                    // the 320-wide effect image of the transitions).
++                    if (last_tex_[t] != &clear_) {
++                        C3D_TexBind(t, &clear_);
++                        last_tex_[t] = &clear_; last_tex_param_[t] = 0xFFFFFFFFu;
++                    }
++                    rtt_sampled_missing_++;
++                    bound = true;
++                }
++                else if (rt.rt != nullptr) {
++                    rt.used_frame = frames_;
+                     if (&rt.tex != last_tex_[t]) {
+                         C3D_TexBind(t, &rt.tex);
+                         last_tex_[t] = &rt.tex; last_tex_param_[t] = 0xFFFFFFFEu;
+@@ -2990,9 +3030,14 @@ private:
+                     bound = true;
+                 }
+             }
+-            if (!bound && last_tex_[t] != &white_) {
+-                C3D_TexBind(t, &white_);
+-                last_tex_[t] = &white_; last_tex_param_[t] = 0xFFFFFFFFu;
++            // D40 (nexus): a fill rect drawn in 1/2-cycle mode with no texture
++            // loaded samples TEXEL0 as 0 (dl_test's reference does; Stadium 2's
++            // battle panels' borders are TEXEL0*PRIM rects, invisible on the N64
++            // and solid white with white_).
++            C3D_Tex* none = (!d.tex[t].valid && d.kind == rt64_3ds::DrawRecord::FillRect && clear_.data != nullptr) ? &clear_ : &white_;
++            if (!bound && last_tex_[t] != none) {
++                C3D_TexBind(t, none);
++                last_tex_[t] = none; last_tex_param_[t] = 0xFFFFFFFFu;
+             }
+         }
+         if (us != last_us_ || vs != last_vs_) {
+@@ -3137,6 +3182,10 @@ private:
+         // The original game's own full-width scissor is stretched to the wide
+         // screen: the patched projection already fills it.
+         if (d.scissor[0] <= 0 && d.scissor[2] >= geo_.w) { x0 = 0; x1 = 400; }
++        else if (rt64_3ds::render_desc().scissor_edges_wide) {   // D61 (nexus)
++            if (d.scissor[0] <= 0) x0 = 0;
++            if (d.scissor[2] >= geo_.w) x1 = 400;
++        }
+         if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > 400) x1 = 400; if (y1 > 240) y1 = 240;
+         // Mtx_OrthoTilt maps screen y = 0 to framebuffer x = 240 and the
+         // screen's left edge to framebuffer y = 400: both axes run backwards.
+@@ -3852,6 +3901,43 @@ public:
+                 if (frame_.draws[i].screen == 0 && rt64_3ds::stretch_tint_quad(frame_.draws[i], frame_.verts.data(), geo_)) tint_[i] = 1;
+             }
+         }
++        // RenderDesc::drop_edge_bars (D52g, nexus): the bar's vertices
++        // collapse onto its first, so its triangles cover no pixel.
++        if (desc.drop_edge_bars) {
++            rt64_3ds::Vtx3ds* vs = frame_.verts.data();
++            for (size_t i = 0; i < frame_.draws.size(); i++) {
++                const rt64_3ds::DrawRecord& d = frame_.draws[i];
++                if (!rt64_3ds::edge_bar(d, vs, geo_)) continue;
++                if (rt64_3ds::seam_bar(d, vs, geo_))   // D64: count them (only the wipe should)
++                    fprintf(stderr, "rt64-3ds: D64 seam bar dropped, draw %u at x %.1f\n", (unsigned)i, vs[d.first].x / vs[d.first].w);
++                for (uint32_t k = d.first + 1; k < d.first + d.count; k++) vs[k] = vs[d.first];
++            }
++        }
++        // RenderDesc::widen_edge_fills (D63, nexus): a fill rectangle's side on
++        // the frame's edge goes to the wide screen's edge (one pixel past it).
++        if (desc.widen_edge_fills) {
++            rt64_3ds::Vtx3ds* vs = frame_.verts.data();
++            const float fw = (float)geo_.w, lo = -geo_.x0 - 1.0f, hi = fw + geo_.x0 + 1.0f;
++            for (size_t i = 0; i < frame_.draws.size(); i++) {
++                const rt64_3ds::DrawRecord& d = frame_.draws[i];
++                if (d.kind != rt64_3ds::DrawRecord::FillRect || d.screen != 0 || d.rtt >= 0 || d.count == 0) continue;
++                float x0 = 1e9f, x1 = -1e9f;
++                bool ok = true;
++                for (uint32_t k = d.first; k < d.first + d.count; k++) {
++                    if (!(vs[k].w > 0.0f)) { ok = false; break; }
++                    const float x = vs[k].x / vs[k].w;
++                    x0 = std::min(x0, x); x1 = std::max(x1, x);
++                }
++                if (!ok) continue;
++                const bool left = x0 <= 0.5f && x0 > lo + 0.5f, right = x1 >= fw - 0.5f && x1 < hi - 0.5f;
++                if (!left && !right) continue;
++                for (uint32_t k = d.first; k < d.first + d.count; k++) {
++                    const float x = vs[k].x / vs[k].w;
++                    if (left && std::fabs(x - x0) <= 0.5f) vs[k].x = lo * vs[k].w;
++                    else if (right && std::fabs(x - x1) <= 0.5f) vs[k].x = hi * vs[k].w;
++                }
++            }
++        }
+         if (!sf.on) return;
+         const rt64_3ds::Vtx3ds* verts = frame_.verts.data();
+         // RenderDesc::infinity_rect_cover_zoom. The vertices are recorded
+@@ -4005,6 +4091,8 @@ public:
+             read_geo_ = rt64_3ds::ScreenGeometry::make(fs.w, fs.h, desc.display_aspect);
+             interp_.set_screen(read_geo_);
+             fprintf(stderr, "rt64-3ds: VI width %u: lists read at %dx%d from here\n", width, read_geo_.w, read_geo_.h);
++            // dbg_frame_trace_from = 1: trace from each VI width change instead (frame numbers vary run to run).
++            if (rt64_3ds::settings().dbg_frame_trace_from == 1) frame_trace_first_ = (int)frames_;
+             return;
+         }
+         if (width != vi_width_logged_) {
+@@ -4077,10 +4165,14 @@ public:
+         uint16_t w = 0, h = 0;
+         C3D_Mtx proj{};
+         uint32_t clear_frame = ~0u;
++        uint32_t fail_frame = ~0u;     // D45: the frame its creation failed in (no retry per draw)
++        uint32_t used_frame = 0;       // D50: the last frame that drew into it or sampled it
+     };
+     RttTarget rtt_[rt64_3ds::kMaxRtt];
+     uint32_t rtt_room_frame_ = ~0u - 8;          // the texture cache last gave VRAM back for a target
+     uint32_t rtt_no_vram_ = 0;                   // targets refused for VRAM, for the log's first lines
++    uint32_t rtt_failed_ = 0, rtt_sampled_missing_ = 0, rtt_freed_ = 0;   // D50: this second's
++    bool rtt_pressure_ = false;                  // D36c: a target failed for VRAM since the last frame start
+     int cur_target_ = -1;                        // the RTT slot drawn into, -1 = the eye
+     RttTarget* ensure_rtt(int i) {
+         const rt64_3ds::RttImage& img = frame_.rtts[i];
+@@ -4090,23 +4182,39 @@ public:
+             // the GPU may still read it): retire it until the next frame start.
+             if (t.rt != nullptr) { retired_rtt_.push_back({ t.rt, t.tex }); t.rt = nullptr; }
+             if (img.pot_w == 0 || img.pot_h == 0) return nullptr;
++            // D45 (nexus): bind_target is asked once per draw into the image;
++            // a target that failed this frame is not tried again (each try
++            // asked VRAM again and logged: 37 lines on the console's VS).
++            if (t.fail_frame == frames_) return nullptr;
+             // Short of VRAM (textures took it): the texture cache gives some
+             // back (free three frames on) and keeps it free; again every four
+             // frames the target still fails.
+-            const uint32_t need = (uint32_t)img.pot_w * img.pot_h * 8;   // RGBA8 + D24S8
+-            if (!C3D_TexInitVRAM(&t.tex, img.pot_w, img.pot_h, GPU_RGBA8)) {
++            const uint32_t need = (uint32_t)img.pot_w * img.pot_h * 4;   // RGBA5551 + D16 (D36d)
++            // D42 (nexus): short of VRAM for RGBA8 + D24S8 (a 512x512 target is
++            // 2 MB; Stadium 2's VS screen on the console had 1464 KB), the
++            // N64's own 16-bit colour and depth: RGBA5551 + D16, half the size.
++            bool made = false;
++            for (int half = 0; half < 2 && !made; half++) {
++                // D36d (nexus): the N64's colour images here are 16-bit (RGBA5551)
++                // and its depth 16-bit: every render texture at 4 bytes a pixel
++                // (Stadium 2's ten 128x512 cup labels took 5 MB at RGBA8 + D24S8,
++                // and those that failed left the labels out). RGBA8 only if 16
++                // bits fail to allocate (they would not fit either).
++                if (!C3D_TexInitVRAM(&t.tex, img.pot_w, img.pot_h, half ? GPU_RGBA8 : GPU_RGBA5551)) continue;
++                t.rt = C3D_RenderTargetCreateFromTex(&t.tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH16);
++                if (t.rt == nullptr) { C3D_TexDelete(&t.tex); continue; }
++                made = true;
++                if (half) fprintf(stderr, "rt64-3ds: render texture %d at RGBA8 + D16\n", i);
++            }
++            if (!made) {
++                t.fail_frame = frames_;
++                rtt_failed_++;
++                rtt_pressure_ = true;   // D36c
+                 if (frames_ - rtt_room_frame_ >= 4) { textures_.make_vram_room(need); rtt_room_frame_ = frames_; }
+                 if (++rtt_no_vram_ <= 5 || (rtt_no_vram_ & 255) == 0)
+                     fprintf(stderr, "rt64-3ds: no VRAM for a %ux%u render texture (%u times)\n", (unsigned)img.pot_w, (unsigned)img.pot_h, (unsigned)rtt_no_vram_);
+                 return nullptr;
+             }
+-            t.rt = C3D_RenderTargetCreateFromTex(&t.tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH24_STENCIL8);
+-            if (t.rt == nullptr) {
+-                C3D_TexDelete(&t.tex);
+-                if (frames_ - rtt_room_frame_ >= 4) { textures_.make_vram_room(need); rtt_room_frame_ = frames_; }
+-                fprintf(stderr, "rt64-3ds: render target for a %ux%u texture failed\n", (unsigned)img.pot_w, (unsigned)img.pot_h);
+-                return nullptr;
+-            }
+             t.w = img.pot_w; t.h = img.pot_h;
+             C3D_TexSetFilter(&t.tex, GPU_LINEAR, GPU_LINEAR);
+             C3D_TexSetWrap(&t.tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+@@ -4125,6 +4233,7 @@ public:
+             clear_target(t.rt, C3D_CLEAR_ALL, 0x000000FF);
+             t.clear_frame = frames_;
+         }
++        t.used_frame = frames_;
+         return &t;
+     }
+     struct RetiredRtt { C3D_RenderTarget* rt; C3D_Tex tex; };
+@@ -4132,6 +4241,34 @@ public:
+     // Out of the frame, just before C3D_FrameBegin (which would wait for the
+     // GPU anyway): render targets ensure_rtt replaced.
+     void retire_rtt_targets() {
++        // D36c (nexus): with kMaxRtt 8 the menus' images (four 128x512
++        // labels, 512 KB each) stay alive into the battle, where round robin
++        // over 4 slots used to replace them. When a target failed for VRAM,
++        // the least recently used one idle for kRttIdle frames goes, one per
++        // frame (the labels first; the portraits, sampled every frame, stay).
++        // Never without a failure: freeing idle targets always blacked out
++        // the portraits on the console (D50).
++        if (rtt_pressure_) {
++            rtt_pressure_ = false;
++            static constexpr uint32_t kRttIdle = 90;
++            int lru = -1;
++            for (int i = 0; i < rt64_3ds::kMaxRtt; i++) {
++                const RttTarget& t = rtt_[i];
++                if (t.rt == nullptr || frames_ - t.used_frame < kRttIdle) continue;
++                if (lru < 0 || t.used_frame < rtt_[lru].used_frame) lru = i;
++            }
++            if (lru >= 0) {
++                RttTarget& t = rtt_[lru];
++                retired_rtt_.push_back({ t.rt, t.tex });
++                t.rt = nullptr; t.w = t.h = 0;
++                t.fail_frame = ~0u;   // the failed target may be retried now
++                rtt_freed_++;
++            }
++        }
++        // D50b (nexus): no release of idle targets. On the console (console-4
++        // log) they failed twice, while releasing the idle ones blacked out
++        // the VS and battle portraits, which the game samples long after
++        // drawing them (8948 samples of a released target).
+         for (RetiredRtt& r : retired_rtt_) { C3D_RenderTargetDelete(r.rt); C3D_TexDelete(&r.tex); }
+         retired_rtt_.clear();
+     }
+@@ -4880,6 +5017,7 @@ public:
+     uint8_t* capture_copy_ = nullptr;
+     OSTask capture_task_{};
+     C3D_Tex white_{};
++    C3D_Tex clear_{};     // D40: transparent 8x8, see apply_state
+     C3D_Tex snapshot_[rt64_3ds::kMaxSnapshots]{};
+     int last_snap_slot_ = 0;                // the slot copy_snapshot_to last filled (verify_snapshot)
+     uint32_t snapshots_ = 0;
+diff --git a/src/renderer/rt64_3ds_dl.cpp b/src/renderer/rt64_3ds_dl.cpp
+index 273233e..5e5498c 100644
+--- a/src/renderer/rt64_3ds_dl.cpp
++++ b/src/renderer/rt64_3ds_dl.cpp
+@@ -1299,9 +1299,20 @@ struct Interpreter::Impl {
+     // is neither a presented framebuffer nor the depth buffer is drawn into
+     // a GPU texture of its own, which later loads from that image sample.
+     bool rtt_enabled = false;
++    bool full_width_on_screen = false;     // RenderDesc::full_width_on_screen
+     RttImage rtt_images[kMaxRtt];
+     uint32_t rtt_list[kMaxRtt] = {};    // the list (list_seq) that last drew into each image
+     int rtt_count = 0, rtt_next = 0;
++    uint32_t rtt_used[kMaxRtt] = {};    // D59: the list (list_seq) that last drew into or loaded from each image
++    // D59 (nexus): all slots taken, the image unused for longest gives its
++    // slot (was a rotation: on the console Stadium 2's 14 cup labels and two
++    // portraits filled the 16, and the battle's images rotated onto the 1P
++    // portrait's slot, which then read RDRAM: an empty 1P panel).
++    int rtt_victim() {
++        int v = 0;
++        for (int i = 1; i < kMaxRtt; i++) if (rtt_used[i] < rtt_used[v]) v = i;
++        return v;
++    }
+     int cur_rtt = -1;                   // the image the current colour image draws into, or -1
+     uint32_t list_seq = 0;              // display lists run so far
+ 
+@@ -1414,20 +1425,22 @@ struct Interpreter::Impl {
+         // A framebuffer the VI presents is on screen wherever it lives
+         // (Dinosaur Planet keeps its 640x480 front-end buffers in patch RAM).
+         if (is_presented_fb(a)) return -1;
++        if (full_width_on_screen && width == (uint32_t)screen_w) return -1;   // RenderDesc::full_width_on_screen
+         if (!rtt_enabled) {
+             if (!frame_copy || width == (uint32_t)screen_w || width == 0) return -1;
+             // A copy target: one texture per address and width (Goemon draws
+             // an 8-wide and a 256-wide image at one address, in memory that
+             // does not overlap, but would in one texture).
+             for (int i = 0; i < rtt_count; i++) {
+-                if (rtt_images[i].addr == a && rtt_images[i].width == width) { rtt_list[i] = list_seq; return i; }
++                if (rtt_images[i].addr == a && rtt_images[i].width == width) { rtt_list[i] = list_seq; rtt_used[i] = list_seq; return i; }
+             }
+-            int i = rtt_count < kMaxRtt ? rtt_count++ : (rtt_next++ % kMaxRtt);
++            int i = rtt_count < kMaxRtt ? rtt_count++ : rtt_victim();
+             rtt_images[i].addr = a;
+             rtt_images[i].width = (uint16_t)width;
+             rtt_images[i].pot_w = pot16(width);
+             rtt_images[i].pot_h = pot16((uint32_t)screen_h);
+             rtt_list[i] = list_seq;
++            rtt_used[i] = list_seq;
+             return i;
+         }
+         // Known once two framebuffers have been presented (a double-buffered
+@@ -1440,14 +1453,16 @@ struct Interpreter::Impl {
+                     rtt_images[i].width = (uint16_t)width;
+                     rtt_images[i].pot_w = pot16(width);
+                 }
++                rtt_used[i] = list_seq;
+                 return i;
+             }
+         }
+-        int i = rtt_count < kMaxRtt ? rtt_count++ : (rtt_next++ % kMaxRtt);
++        int i = rtt_count < kMaxRtt ? rtt_count++ : rtt_victim();
+         rtt_images[i].addr = a;
+         rtt_images[i].width = (uint16_t)width;
+         rtt_images[i].pot_w = pot16(width);
+         rtt_images[i].pot_h = pot16((uint32_t)screen_h);
++        rtt_used[i] = list_seq;
+         return i;
+     }
+     static uint16_t pot16(uint32_t v) { uint32_t p = 8; while (p < v && p < 1024) p <<= 1; return (uint16_t)p; }
+@@ -1906,16 +1921,27 @@ struct Interpreter::Impl {
+         // With sample_drawn_frame a block load of whole rows of an image
+         // reads it too (the rims load their strips with LOADBLOCK), but only
+         // an image drawn by this list: the memory is the game's to reuse.
+-        if ((rtt_enabled || frame_copy) && !d.snapshot && !d.frame && (!best->block || frame_copy) && tl.siz == 2) {
++        // D36: with render_to_texture a block load reads it as well (Pokemon
++        // Stadium 2's 32-wide battle portraits): before, it read RDRAM, which
++        // the GPU never writes, and drew noise.
++        if ((rtt_enabled || frame_copy) && !d.snapshot && !d.frame && tl.siz == 2) {
+             const uint32_t row = best->block ? pitch : best->pitch;
+             for (int i = 0; i < rtt_count; i++) {
+                 const RttImage& img = rtt_images[i];
++                static int d36_logged = 0;   // D36 diag: loads inside an off-screen image
++                if (d36_logged < 16 && d.addr >= img.addr && d.addr < img.addr + (uint32_t)img.width * 2 * img.pot_h) {
++                    d36_logged++;
++                    fprintf(stderr, "rt64-3ds: D36 load %06x in rtt %d (img %06x w%u): block %d row %u fmt %u siz %u tile %dx%d\n",
++                            d.addr & 0xFFFFFF, i, img.addr & 0xFFFFFF, (unsigned)img.width, best->block ? 1 : 0, row,
++                            (unsigned)tl.fmt, (unsigned)tl.siz, w, h);
++                }
+                 if (!rtt_enabled && rtt_list[i] != list_seq) continue;
+-                if (d.addr >= img.addr && d.addr < img.addr + (uint32_t)img.width * 2 * img.pot_h && row == (uint32_t)img.width * 2) {
+-                    d.rtt = (int8_t)i;
+-                    break;
++                if (d.addr >= img.addr && d.addr < img.addr + (uint32_t)img.width * 2 * img.pot_h && row == (uint32_t)img.width * 2 &&
++                    (d.rtt < 0 || img.addr > rtt_images[d.rtt].addr)) {
++                    d.rtt = (int8_t)i;   // D36: the nearest image below the load (images 0x880 apart overlap in 512 rows)
+                 }
+             }
++            if (d.rtt >= 0) rtt_used[d.rtt] = list_seq;   // D59
+         }
+         d.tlut_mode = (othermode_h >> 14) & 3;
+         // With the TLUT on, the RDP looks every 4- and 8-bit texel up in the
+@@ -4047,6 +4073,7 @@ void Interpreter::set_gbi(Gbi gbi) {
+     impl_->op_table = gbi == Gbi::F3DEX ? kF3dexOp.v : kF3dex2Op.v;
+ }
+ void Interpreter::set_render_to_texture(bool on) { impl_->rtt_enabled = on; }
++void Interpreter::set_full_width_on_screen(bool on) { impl_->full_width_on_screen = on; }
+ void Interpreter::set_sample_drawn_frame(bool on) { impl_->frame_copy = on; }
+ void Interpreter::set_primary_world_instance(bool on) { impl_->inst_track = on; }
+ void Interpreter::set_unify_world_depth(bool on) { impl_->unify_depth = on; impl_->update_depth_terms(); }
+diff --git a/src/renderer/rt64_3ds_dl.h b/src/renderer/rt64_3ds_dl.h
+index 4792997..55636ef 100644
+--- a/src/renderer/rt64_3ds_dl.h
++++ b/src/renderer/rt64_3ds_dl.h
+@@ -118,6 +118,7 @@ public:
+     // Draw off-screen colour images into textures of their own instead of
+     // dropping them (see FrameRecord::rtts).
+     void set_render_to_texture(bool on);
++    void set_full_width_on_screen(bool on);
+     // RenderDesc::sample_drawn_frame: loads from the colour image being
+     // drawn, after draws went into it, sample the frame drawn so far
+     // (TexDesc::frame, FrameRecord::frame_sample_last), and images of
+diff --git a/src/renderer/rt64_3ds_record.h b/src/renderer/rt64_3ds_record.h
+index 38de275..97d2bcf 100644
+--- a/src/renderer/rt64_3ds_record.h
++++ b/src/renderer/rt64_3ds_record.h
+@@ -179,7 +179,14 @@ struct RttImage {
+     uint16_t width = 0;
+     uint16_t pot_w = 0, pot_h = 0;
+ };
+-constexpr int kMaxRtt = 4;
++// D36b (nexus): 16 (was 4). Pokemon Stadium 2 keeps more off-screen images
++// alive than 4: ten 118-wide labels on the team entry screen, the battle's
++// two portraits and its three new 320-wide framebuffers (drawn while the
++// screen was still 640 wide). With 4 slots, round robin, the framebuffers
++// took the 1P portrait's slot (it then read RDRAM: noise). A slot costs
++// VRAM only once drawn into; D36c frees the least recently used one when a
++// target fails for VRAM.
++constexpr int kMaxRtt = 16;
+ // Storage buffers the game copies presented frames into, each with a GPU copy
+ // of its own (Dinosaur Planet's effects keep two and the pause a third).
+ constexpr int kMaxSnapshots = 4;
+diff --git a/src/renderer/rt64_3ds_stereo.cpp b/src/renderer/rt64_3ds_stereo.cpp
+index 047acf9..7095b1e 100644
+--- a/src/renderer/rt64_3ds_stereo.cpp
++++ b/src/renderer/rt64_3ds_stereo.cpp
+@@ -276,6 +276,41 @@ bool stretch_tint_quad(const DrawRecord& d, Vtx3ds* verts, const ScreenGeometry&
+     return true;
+ }
+ 
++bool edge_bar(const DrawRecord& d, const Vtx3ds* verts, const ScreenGeometry& geo) {
++    if (d.kind != DrawRecord::Tris || d.count == 0 || d.count > 6 || d.rtt >= 0 || d.screen != 0) return false;
++    if (d.tex[0].valid || d.tex[1].valid) return false;
++    float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
++    for (uint32_t i = d.first; i < d.first + d.count; i++) {
++        const Vtx3ds& v = verts[i];
++        if (!(v.w > 0.0f)) return false;
++        const float x = v.x / v.w, y = v.y / v.w;
++        x0 = std::min(x0, x); x1 = std::max(x1, x); y0 = std::min(y0, y); y1 = std::max(y1, y);
++    }
++    const float w = (float)geo.w, h = (float)geo.h;
++    if (x1 - x0 > kEdgeBarWidth || y1 - y0 < 0.9f * h) return false;
++    const bool left = x0 >= -kEdgeBarWidth && x1 <= kEdgeBarWidth;
++    const bool right = x0 >= w - kEdgeBarWidth && x1 <= w + kEdgeBarWidth;
++    if (left || right) return true;
++    return seam_bar(d, verts, geo);
++}
++
++bool seam_bar(const DrawRecord& d, const Vtx3ds* verts, const ScreenGeometry& geo) {
++    // Exactly the wipe's bar: two triangles, untextured, black vertices,
++    // 1.5 to 2.5 pixels wide, the frame's whole height, inside the frame.
++    if (d.kind != DrawRecord::Tris || d.count != 6 || d.rtt >= 0 || d.screen != 0) return false;
++    if (d.tex[0].valid || d.tex[1].valid) return false;
++    float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
++    for (uint32_t i = d.first; i < d.first + d.count; i++) {
++        const Vtx3ds& v = verts[i];
++        if (!(v.w > 0.0f) || v.r > 8 || v.g > 8 || v.b > 8) return false;
++        const float x = v.x / v.w, y = v.y / v.w;
++        x0 = std::min(x0, x); x1 = std::max(x1, x); y0 = std::min(y0, y); y1 = std::max(y1, y);
++    }
++    const float w = (float)geo.w, h = (float)geo.h;
++    if (x1 - x0 < 1.5f || x1 - x0 > 2.5f || y0 > 0.5f || y1 < h - 0.5f) return false;
++    return x0 >= kEdgeBarWidth && x1 <= w - kEdgeBarWidth;
++}
++
+ bool rect_covers_frame(const DrawRecord& d, const Vtx3ds* verts, int frame_w, int frame_h) {
+     float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+     for (uint32_t i = d.first; i < d.first + d.count; i++) {
+diff --git a/src/renderer/rt64_3ds_stereo.h b/src/renderer/rt64_3ds_stereo.h
+index 2108fc9..26fbb1b 100644
+--- a/src/renderer/rt64_3ds_stereo.h
++++ b/src/renderer/rt64_3ds_stereo.h
+@@ -108,6 +108,18 @@ bool rect_covers_frame(const DrawRecord& d, const Vtx3ds* verts, int frame_w, in
+ constexpr float kTintQuadMargin = 12.0f;
+ bool stretch_tint_quad(const DrawRecord& d, Vtx3ds* verts, const ScreenGeometry& geo);
+ 
++// RenderDesc::drop_edge_bars: triangles (at most two), untextured, on the
++// screen, whose bounds are at most kEdgeBarWidth N64 pixels wide, lie
++// within that of the frame's left or right edge, and cover at least
++// nine tenths of its height.
++constexpr float kEdgeBarWidth = 4.0f;
++bool edge_bar(const DrawRecord& d, const Vtx3ds* verts, const ScreenGeometry& geo);
++// D64 (nexus): Pokemon Stadium 2's camera wipe draws that bar at the seam
++// of its two halves too, so it crosses the frame. edge_bar also takes this
++// exact bar (two triangles, black vertices, 1.5-2.5 px wide, the frame's
++// whole height) anywhere inside the frame.
++bool seam_bar(const DrawRecord& d, const Vtx3ds* verts, const ScreenGeometry& geo);
++
+ // Positive view distance of a depth sample z' (= (ndc z + 1) / 2) under the
+ // world projection's m[2][2] and m[3][2]; <= 0 when invalid.
+ float view_depth(float zp, float m22, float m32);
+diff --git a/src/renderer/rt64_3ds_tev.cpp b/src/renderer/rt64_3ds_tev.cpp
+index 2323a36..79ecec6 100644
+--- a/src/renderer/rt64_3ds_tev.cpp
++++ b/src/renderer/rt64_3ds_tev.cpp
+@@ -230,6 +230,21 @@ void plan_tev(const DrawRecord& d, TevPlan& plan) {
+     }
+ 
+     int cycles = (cyc == 1) ? 2 : 1;
++    if (cycles == 2 && d.tex[1].valid) {
++        // D46 (nexus): in 2-cycle mode the RDP's second cycle reads its
++        // TEXEL0 input from texel 1 and TEXEL1 from texel 0 (angrylion moves
++        // texel1 into texel0 between the cycles). Pokemon Stadium 2's names
++        // take the glyph's shape from TEXEL1 alpha in cycle 2 (cc 517e02
++        // 3f55ffff, glyph in tile 0, an I8 bar in tile 1): unswapped, every
++        // letter was the bar. Only with a second texture loaded, so a draw
++        // with one texture keeps reading it.
++        for (Src* s : { &a1, &b1, &c1, &d1, &Aa1, &Ab1, &Ac1, &Ad1 }) {
++            if (*s == S_TEX0) *s = S_TEX1;
++            else if (*s == S_TEX1) *s = S_TEX0;
++            else if (*s == S_TEX0_A) *s = S_TEX1_A;
++            else if (*s == S_TEX1_A) *s = S_TEX0_A;
++        }
++    }
+     for (int cy = 0; cy < cycles; cy++) {
+         Op rgb[2], alpha[2];
+         auto fr = [&](Src s) { return fold_const(s, false, k); };

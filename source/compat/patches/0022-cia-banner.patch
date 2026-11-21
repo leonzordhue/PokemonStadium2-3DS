@@ -1,0 +1,19 @@
+--- CMakeLists.txt.antes-0022	2026-11-20 08:10:56.499678156 -0400
++++ CMakeLists.txt	2026-11-20 08:11:18.742193590 -0400
+@@ -101,11 +101,12 @@
+ 
+ set(S2_TITLE "Pokemon Stadium 2")
+ set(S2_DESCRIPTION "Pokemon Stadium 2 Recompiled - New 3DS")
+-# ponytail: icon.png is a placeholder (48x48); swap for real art before release.
++# icon.png: original 48x48 art (nexus D30).
+ add_3dsx(PokemonStadium2Recompiled3DS TITLE "${S2_TITLE}" DESCRIPTION "${S2_DESCRIPTION}"
+          ICON "${CMAKE_CURRENT_LIST_DIR}/icon.png")
+ include("${RT64_3DS_DIR}/cmake/Cia.cmake")
+-# New 3DS focus: the template asks SystemModeExt 124MB. No banner of our own
+-# yet (add_cia without BANNER_*); OLD3DS_MODE stays the library's 80MB default.
++# New 3DS focus: the template asks SystemModeExt 124MB.
++# OLD3DS_MODE stays the library 80MB default. Banner: original art (nexus D30), jingle from rt64-3ds.
+ add_cia(PokemonStadium2Recompiled3DS RSF "${RT64_3DS_DIR}/cia/template.rsf" TITLE "${S2_TITLE}" PRODUCT "PKS2-3DS" UNIQUEID 0xF5D20
+-        ICON "${CMAKE_CURRENT_LIST_DIR}/icon.png" DESCRIPTION "${S2_DESCRIPTION}")
++        ICON "${CMAKE_CURRENT_LIST_DIR}/icon.png" DESCRIPTION "${S2_DESCRIPTION}"
++        BANNER_PNG "${CMAKE_CURRENT_LIST_DIR}/cia/banner.png" BANNER_WAV "${CMAKE_CURRENT_LIST_DIR}/cia/banner.wav")

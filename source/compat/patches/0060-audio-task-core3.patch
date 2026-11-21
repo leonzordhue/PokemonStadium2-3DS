@@ -1,0 +1,16 @@
+--- BanjoRecomp3D/lib/rt64-3ds/src/platform/recomp3ds_run.cpp.antes-0060
++++ BanjoRecomp3D/lib/rt64-3ds/src/platform/recomp3ds_run.cpp
+@@ -1455,6 +1455,13 @@
+             Thread probe3 = threadCreate([](void*) {}, nullptr, 4096, 0x30, 3, false);
+             fprintf(stderr, "recomp3ds: a thread on core 3: %s\n", probe3 != nullptr ? "created" : "refused");
+             if (probe3 != nullptr) { threadJoin(probe3, UINT64_MAX); threadFree(probe3); g_core3 = true; g_watch_cores |= 0x8; }
++            // P48 [Proton]: the audio task on core 3 when the system lets the application run there
++            // (a .3dsx; a CIA is refused and keeps core 1). Stadium 2: core 1 saturated in battle by
++            // the audio ucode while core 3 sat idle (proton/P48-batalha.md).
++            if (g_core3 && core2 && g_sp_core == 1) {
++                g_sp_core = 3;
++                fprintf(stderr, "recomp3ds: P48: audio task on core 3\n");
++            }
+         }
+         // The renderer's own core-1 helper (the in-between builder) is a
+         // New 3DS's extra: none when core 2 is left out.

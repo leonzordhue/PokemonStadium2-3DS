@@ -1,0 +1,89 @@
+diff -ruN a/lib/N64ModernRuntime/librecomp/include/librecomp/rsp.hpp b/lib/N64ModernRuntime/librecomp/include/librecomp/rsp.hpp
+--- a/lib/N64ModernRuntime/librecomp/include/librecomp/rsp.hpp	2026-11-20 10:52:00.384869755 -0400
++++ b/lib/N64ModernRuntime/librecomp/include/librecomp/rsp.hpp	2026-11-20 10:52:00.437234126 -0400
+@@ -157,6 +157,13 @@
+     dma_dram_address += rsp_dma_dram_increment(_rsp_dma_len_reg); \
+ } while (0)
+ 
++// s2-3ds P36: an asynchronous audio task runs after the game was told it had
++// completed, and the game may have rebuilt its command list meanwhile. The
++// task thread points these at the list as it was when the task was submitted
++// (physical base, size, the RDRAM bytes as stored); DMA reads inside it come
++// from that copy. size 0 = off. Defined in ultramodern events.cpp.
++extern "C" uint32_t s2_alist_base, s2_alist_size;
++extern "C" const uint8_t* s2_alist_bytes;
+ static inline void dma_rdram_to_dmem(uint8_t* rdram, uint32_t dmem_addr, uint32_t dram_addr, uint32_t rd_len) {
+     const uint32_t block_len = rsp_dma_block_len(rd_len);
+     const uint32_t count = rsp_dma_count(rd_len);
+@@ -165,7 +172,9 @@
+     uint32_t cur_dram = dram_addr & 0xFFFFF8u;
+     for (uint32_t block = 0; block <= count; block++) {
+         for (uint32_t i = 0; i < block_len; i++) {
+-            RSP_MEM_B(i, cur_dmem) = MEM_B(0, (int64_t)(int32_t)(cur_dram + i + 0x80000000));
++            const uint32_t s2_off = cur_dram + i - s2_alist_base;
++            if (s2_off < s2_alist_size) RSP_MEM_B(i, cur_dmem) = (int8_t)s2_alist_bytes[s2_off ^ 3];
++            else RSP_MEM_B(i, cur_dmem) = MEM_B(0, (int64_t)(int32_t)(cur_dram + i + 0x80000000));
+         }
+         cur_dmem = (cur_dmem + block_len) & 0x0FFFu;
+         cur_dram = (cur_dram + block_len + (block != count ? skip : 0u)) & 0xFFFFF8u;
+diff -ruN a/lib/N64ModernRuntime/ultramodern/src/events.cpp b/lib/N64ModernRuntime/ultramodern/src/events.cpp
+--- a/lib/N64ModernRuntime/ultramodern/src/events.cpp	2026-11-20 10:52:00.386728358 -0400
++++ b/lib/N64ModernRuntime/ultramodern/src/events.cpp	2026-11-20 10:52:00.437486627 -0400
+@@ -1,6 +1,7 @@
+ #include <thread>
+ #include <atomic>
+ #include <deque>
++#include <vector>
+ #include <mutex>
+ #include <chrono>
+ #include <cinttypes>
+@@ -310,6 +311,11 @@
+ static std::atomic_uint32_t audio_completed = 0;
+ static std::mutex async_audio_mutex;
+ static std::deque<OSTask> async_audio_copies;
++// s2-3ds P36: the command list of each queued copy, as it was at submission
++// (RDRAM bytes as stored), read by the RSP DMA through s2_alist_* (rsp.hpp).
++static std::deque<std::vector<uint8_t>> async_audio_lists;
++extern "C" { uint32_t s2_alist_base = 0, s2_alist_size = 0; const uint8_t* s2_alist_bytes = nullptr; }
++static constexpr uint32_t kAlistMax = 0x10000;
+ static OSTask async_audio_marker_storage;
+ static OSTask* const async_audio_marker = &async_audio_marker_storage;
+ 
+@@ -345,14 +351,24 @@
+         // been reported; run the copy and hand over the samples waiting on it.
+         if (task == async_audio_marker) {
+             OSTask local;
++            std::vector<uint8_t> list;
+             {
+                 std::lock_guard lock{ async_audio_mutex };
+                 local = async_audio_copies.front();
+                 async_audio_copies.pop_front();
++                list = std::move(async_audio_lists.front());
++                async_audio_lists.pop_front();
++            }
++            if (!list.empty()) {   // P36: the list as submitted
++                s2_alist_base = (uint32_t)local.t.data_ptr & 0xFFFFF8u;
++                s2_alist_bytes = list.data();
++                s2_alist_size = (uint32_t)list.size();
+             }
+             if (!ultramodern::rsp::run_task(PASS_RDRAM &local)) {
+                 s2_task_failed(local.t.type);   // s2-3ds P10c: drop it like the fork (run_rsp_task_or_warn)
+             }
++            s2_alist_size = 0;
++            s2_alist_bytes = nullptr;
+             ultramodern::flush_audio_buffers(PASS_RDRAM ++audio_completed);
+             continue;
+         }
+@@ -651,6 +667,12 @@
+         {
+             std::lock_guard lock{ async_audio_mutex };
+             async_audio_copies.push_back(*task);
++            // P36: copy the command list now; the game may rebuild it before the task runs.
++            const uint32_t base = (uint32_t)task->t.data_ptr & 0xFFFFF8u;
++            const uint32_t end = (((uint32_t)task->t.data_ptr & 0xFFFFFFu) + (uint32_t)task->t.data_size + 7u) & ~7u;
++            std::vector<uint8_t> list;
++            if (end > base && end - base <= kAlistMax && end <= 0x1000000u) list.assign(rdram + base, rdram + end);
++            async_audio_lists.push_back(std::move(list));
+         }
+         audio_submitted++;
+         sp_complete();

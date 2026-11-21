@@ -1,0 +1,69 @@
+diff -ruN a/lib/N64ModernRuntime/ultramodern/src/mesgqueue.cpp b/lib/N64ModernRuntime/ultramodern/src/mesgqueue.cpp
+--- a/lib/N64ModernRuntime/ultramodern/src/mesgqueue.cpp	2026-11-20 08:09:58.475168871 -0400
++++ b/lib/N64ModernRuntime/ultramodern/src/mesgqueue.cpp	2026-11-20 08:10:16.733283795 -0400
+@@ -6,6 +6,33 @@
+ #include "ultramodern/ultra64.h"
+ #include "ultramodern/ultramodern.hpp"
+ 
++#ifdef S2_QUEUE_WAIT
++// D28 (s2-3ds): how long game threads stay blocked in osRecvMesg, per queue,
++// printed once a second. Finds the message the frame manager waits on last.
++#include <chrono>
++#include <cstdio>
++namespace {
++struct QWait { uint32_t mq; uint32_t thread; uint64_t us; uint32_t n; };
++QWait s2_qwait[16];
++std::chrono::steady_clock::time_point s2_qwait_t0 = std::chrono::steady_clock::now();
++void s2_qwait_note(uint32_t mq, uint32_t thread, uint64_t us) {
++    for (QWait& q : s2_qwait) {
++        if (q.n == 0 && q.mq == 0) { q.mq = mq; q.thread = thread; }
++        if (q.mq == mq && q.thread == thread) { q.us += us; q.n++; break; }
++    }
++    auto now = std::chrono::steady_clock::now();
++    if (now - s2_qwait_t0 < std::chrono::seconds(1)) return;
++    s2_qwait_t0 = now;
++    fprintf(stderr, "qwait:");
++    for (QWait& q : s2_qwait) {
++        if (q.n != 0) fprintf(stderr, " t%u %08X %llums/%u", (unsigned)q.thread, (unsigned)q.mq, (unsigned long long)(q.us / 1000), (unsigned)q.n);
++        q.us = 0; q.n = 0;
++    }
++    fprintf(stderr, "\n");
++}
++}
++#endif
++
+ struct QueuedMessage {
+     PTR(OSMesgQueue) mq;
+     OSMesg mesg;
+@@ -282,8 +309,16 @@
+ #ifdef S2_BOOT_TRACE
+     if (flags == OS_MESG_BLOCK && mq->validCount == 0) fprintf(stderr, "[os] RecvMesg BLOCK mq %08X thread %d\n", (unsigned)mq_, (int)TO_PTR(OSThread, ultramodern::this_thread())->id);
+ #endif
++#ifdef S2_QUEUE_WAIT
++    const bool s2_waits = flags == OS_MESG_BLOCK && mq->validCount == 0;
++    const auto s2_w0 = std::chrono::steady_clock::now();
++#endif
+     // Try to receive a message.
+     bool received = do_recv(PASS_RDRAM mq_, msg_, flags == OS_MESG_BLOCK);
++#ifdef S2_QUEUE_WAIT
++    if (s2_waits) s2_qwait_note((uint32_t)mq_, (uint32_t)TO_PTR(OSThread, ultramodern::this_thread())->id,
++        (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - s2_w0).count());
++#endif
+ #ifdef S2_BOOT_TRACE
+     if (received && (uint32_t)mq_ == 0x800CDA10u && msg_ != NULLPTR) {   // P11: o que o agendador recebe
+         static uint32_t n; const uint32_t v = (uint32_t)*TO_PTR(OSMesg, msg_);
+diff -ruN a/platform/3ds/CMakeLists.txt b/platform/3ds/CMakeLists.txt
+--- a/platform/3ds/CMakeLists.txt	2026-11-20 08:09:58.476743171 -0400
++++ b/platform/3ds/CMakeLists.txt	2026-11-20 08:09:58.551715073 -0400
+@@ -35,6 +35,11 @@
+ add_compile_definitions(RECOMP_MEM_MASK=0x00FFFFFFu RECOMP_3DS_PREEMPT_CHECK RECOMP_CF_NOTE_DISABLED)
+ add_subdirectory("${RT64_3DS_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/rt64-3ds")
+ # Boot diagnosis (19/11): [os] thread/mesg trace in ultramodern. Remove when the boot works.
++# D28: per-queue blocked time in osRecvMesg, 1x/s ("qwait:" lines). Configure with -DS2_QUEUE_WAIT=ON.
++option(S2_QUEUE_WAIT "Log how long game threads wait per message queue" OFF)
++if(S2_QUEUE_WAIT AND TARGET ultramodern)
++    target_compile_definitions(ultramodern PRIVATE S2_QUEUE_WAIT)
++endif()
+ option(S2_BOOT_TRACE "ultramodern thread/message trace" ON)
+ if(S2_BOOT_TRACE AND TARGET ultramodern)
+     target_compile_definitions(ultramodern PRIVATE S2_BOOT_TRACE)

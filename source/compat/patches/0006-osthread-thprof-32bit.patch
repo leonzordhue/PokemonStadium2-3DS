@@ -1,0 +1,14 @@
+--- a/ultramodern/include/ultramodern/ultra64.h
++++ b/ultramodern/include/ultramodern/ultra64.h
+@@ -103,6 +103,11 @@
+     uint16_t state;
+     OSId id;
+     int32_t pad3;
++#if UINTPTR_MAX == UINT32_MAX
++    // s2-3ds (port web stadium2-runtime.patch): thprof do libultra em 0x1C. Num host de 32 bits (3DS) o
++    // ponteiro abaixo cairia nele; num de 64 bits o alinhamento ja o empurra para 0x20.
++    int32_t pad4;
++#endif
+     UltraThreadContext* context; // An actual pointer regardless of platform
+     int32_t sp;
+ } OSThread;

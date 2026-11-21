@@ -1,0 +1,44 @@
+--- a/platform/3ds/CMakeLists.txt
++++ b/platform/3ds/CMakeLists.txt
+@@ -83,6 +83,12 @@
+ # s2-3ds P10: Game_DoCopyProtection reads the cart at 0xB0000E38; no kseg1 ROM mirror on the 3DS (see main_3ds.cpp)
+ target_link_options(PokemonStadium2Recompiled3DS PRIVATE "-Wl,--wrap=func_80064C20")
+ # Bring-up: accept the display lists and draw nothing.
++# Nexus D25: names the running game function for dbg_profile=2 (needs trace_mode = true in game.toml
++# and a regenerated generated/; compat/trace.h). Measurement builds only: ~8% bigger and slower.
++option(S2_GAME_PROFILE "trace.h names the running game function, for dbg_profile=2" OFF)
++if(S2_GAME_PROFILE)
++    target_compile_definitions(RecompiledFuncs PRIVATE S2_GAME_PROFILE)
++endif()
+ option(S2_NULL_RENDERER "Build with rt64-3ds's null renderer" OFF)
+ if(S2_NULL_RENDERER)
+     target_compile_definitions(PokemonStadium2Recompiled3DS PRIVATE S2_NULL_RENDERER)
+--- /dev/null
++++ b/compat/trace.h
+@@ -0,0 +1,26 @@
++// s2-3ds (Nexus D25): included by the generated game code when game.toml has trace_mode = true.
++// TRACE_ENTRY at each function start, TRACE_RETURN before each return (n64recomp-fork recompilation.cpp).
++// Off (default): both empty, so the code is the same as a build without trace_mode.
++// S2_GAME_PROFILE=ON (CMake): name the running function for rt64-3ds's sampling profile
++// (settings.ini dbg_profile=2; game_profile.cpp reads recomp3ds_trace_func). Same scheme as
++// BanjoRecomp3D/platform/3ds/trace.h, without its preemption check. Costs ~8% size and speed: measure only.
++#ifndef S2_TRACE_H
++#define S2_TRACE_H
++#ifdef S2_GAME_PROFILE
++#ifdef __cplusplus
++extern "C" {
++#endif
++extern const char* volatile recomp3ds_trace_func;   // defined in rt64-3ds game_profile.cpp
++#ifdef __cplusplus
++}
++#endif
++#define TRACE_ENTRY() \
++    const char* const trace_prev_ = recomp3ds_trace_func; \
++    recomp3ds_trace_func = __func__;
++#define TRACE_RETURN() \
++    recomp3ds_trace_func = trace_prev_;
++#else
++#define TRACE_ENTRY()
++#define TRACE_RETURN()
++#endif
++#endif

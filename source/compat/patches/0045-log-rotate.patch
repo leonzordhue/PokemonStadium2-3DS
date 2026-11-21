@@ -1,0 +1,22 @@
+diff -ruN a/BanjoRecomp3D/lib/rt64-3ds/src/platform/log.cpp b/BanjoRecomp3D/lib/rt64-3ds/src/platform/log.cpp
+--- a/BanjoRecomp3D/lib/rt64-3ds/src/platform/log.cpp	2026-11-20 15:58:56.664483436 -0400
++++ b/BanjoRecomp3D/lib/rt64-3ds/src/platform/log.cpp	2026-11-20 15:58:57.113311540 -0400
+@@ -230,6 +230,18 @@
+     LightLock_Init(&g_ring_lock);
+     char path[192];
+     snprintf(path, sizeof(path), "%s/log.txt", base_path);
++    {
++        // D48 (nexus): the last two runs' logs kept as log-1.txt and log-2.txt
++        // (a run that crashed, or one the player only reports after starting
++        // the game again, is not written over). FAT's rename refuses an
++        // existing target: the oldest goes first.
++        char older[192], old1[192];
++        snprintf(older, sizeof(older), "%s/log-2.txt", base_path);
++        snprintf(old1, sizeof(old1), "%s/log-1.txt", base_path);
++        remove(older);
++        rename(old1, older);
++        rename(path, old1);
++    }
+     g_file = fopen(path, "w");
+     // 3dslink owns stdout and stderr through its own socket devoptab; leave
+     // that alone.

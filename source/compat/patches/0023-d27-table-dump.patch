@@ -1,0 +1,38 @@
+--- a/platform/3ds/main_3ds.cpp
++++ b/platform/3ds/main_3ds.cpp
+@@ -151,6 +151,19 @@
+ volatile bool g_tpak_run = true;
+ Thread g_tpak_thread = nullptr;
+ extern "C" volatile uint32_t s2_last_loop_pc;
++uint8_t* g_s2_rdram = nullptr;   // D27: set in s2_on_init
++
++// D27 (nexus): the game thread sat in func_80013B54 (loop 0x80013B74..0x80013C38)
++// at the Rental -> battle load. Print the table it walks: D_8011BE90 +0x29AC ptr,
++// +0x29B0 total, +0x29B4 count, +0x2BBE/F next slots. A huge count = corrupted.
++void s2_dump_80013B54() {
++    if (!g_s2_rdram) return;
++    auto w = [](uint32_t va) { return *reinterpret_cast<uint32_t*>(g_s2_rdram + (va - 0x80000000u)); };
++    const uint32_t base = 0x8011BE90u;
++    fprintf(stderr, "[S2] D27 tbl ptr %08lX total %08lX count %08lX flag %08lX slots %08lX\n",
++            (unsigned long)w(base + 0x29AC), (unsigned long)w(base + 0x29B0), (unsigned long)w(base + 0x29B4),
++            (unsigned long)w(base + 0x29B8), (unsigned long)w(base + 0x2BBC));
++}
+ 
+ // The S1 writes the Game Boy saves back every couple of seconds and on exit
+ // (tpak/COMPORTAMENTO-S1.md); tpak:: holds its own lock.
+@@ -162,12 +175,14 @@
+         static uint32_t last = 0;   // boot-hang diagnosis: where the game loops
+         const uint32_t pc = s2_last_loop_pc;
+         fprintf(stderr, "[S2] loop pc %08lX%s\n", (unsigned long)pc, pc == last ? " (same)" : "");
++        if (pc >= 0x80013B54u && pc < 0x80013C40u) s2_dump_80013B54();
+         last = pc;
+     }
+ }
+ 
+ void s2_on_init(uint8_t* rdram, recomp_context* ctx) {
+-    (void)rdram; (void)ctx;
++    (void)ctx;
++    g_s2_rdram = rdram;
+     pokestadium::register_runtime_trampolines();
+     recomp3ds::input_set_cstick_buttons(false);    // the C-Stick is the D-pad (kButtons)
+     tpak::set_base_dir(kSdDir);

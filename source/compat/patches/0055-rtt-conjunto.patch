@@ -1,0 +1,93 @@
+diff -ruN a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp
+--- a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp	2026-11-20 19:41:32.796197016 -0400
++++ b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_context.cpp	2026-11-20 19:41:32.916910919 -0400
+@@ -4131,6 +4131,7 @@
+     uint32_t rtt_room_frame_ = ~0u - 8;          // the texture cache last gave VRAM back for a target
+     uint32_t rtt_no_vram_ = 0;                   // targets refused for VRAM, for the log's first lines
+     uint32_t rtt_failed_ = 0, rtt_sampled_missing_ = 0, rtt_freed_ = 0;   // D50: this second's
++    bool rtt_pressure_ = false;                  // D36c: a target failed for VRAM since the last frame start
+     int cur_target_ = -1;                        // the RTT slot drawn into, -1 = the eye
+     RttTarget* ensure_rtt(int i) {
+         const rt64_3ds::RttImage& img = frame_.rtts[i];
+@@ -4147,21 +4148,27 @@
+             // Short of VRAM (textures took it): the texture cache gives some
+             // back (free three frames on) and keeps it free; again every four
+             // frames the target still fails.
+-            const uint32_t need = (uint32_t)img.pot_w * img.pot_h * 8;   // RGBA8 + D24S8
++            const uint32_t need = (uint32_t)img.pot_w * img.pot_h * 4;   // RGBA5551 + D16 (D36d)
+             // D42 (nexus): short of VRAM for RGBA8 + D24S8 (a 512x512 target is
+             // 2 MB; Stadium 2's VS screen on the console had 1464 KB), the
+             // N64's own 16-bit colour and depth: RGBA5551 + D16, half the size.
+             bool made = false;
+             for (int half = 0; half < 2 && !made; half++) {
+-                if (!C3D_TexInitVRAM(&t.tex, img.pot_w, img.pot_h, half ? GPU_RGBA5551 : GPU_RGBA8)) continue;
+-                t.rt = C3D_RenderTargetCreateFromTex(&t.tex, GPU_TEXFACE_2D, 0, half ? GPU_RB_DEPTH16 : GPU_RB_DEPTH24_STENCIL8);
++                // D36d (nexus): the N64's colour images here are 16-bit (RGBA5551)
++                // and its depth 16-bit: every render texture at 4 bytes a pixel
++                // (Stadium 2's ten 128x512 cup labels took 5 MB at RGBA8 + D24S8,
++                // and those that failed left the labels out). RGBA8 only if 16
++                // bits fail to allocate (they would not fit either).
++                if (!C3D_TexInitVRAM(&t.tex, img.pot_w, img.pot_h, half ? GPU_RGBA8 : GPU_RGBA5551)) continue;
++                t.rt = C3D_RenderTargetCreateFromTex(&t.tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH16);
+                 if (t.rt == nullptr) { C3D_TexDelete(&t.tex); continue; }
+                 made = true;
+-                if (half) fprintf(stderr, "rt64-3ds: render texture %d at 16 bits (RGBA5551 + D16) for VRAM\n", i);
++                if (half) fprintf(stderr, "rt64-3ds: render texture %d at RGBA8 + D16\n", i);
+             }
+             if (!made) {
+                 t.fail_frame = frames_;
+                 rtt_failed_++;
++                rtt_pressure_ = true;   // D36c
+                 if (frames_ - rtt_room_frame_ >= 4) { textures_.make_vram_room(need); rtt_room_frame_ = frames_; }
+                 if (++rtt_no_vram_ <= 5 || (rtt_no_vram_ & 255) == 0)
+                     fprintf(stderr, "rt64-3ds: no VRAM for a %ux%u render texture (%u times)\n", (unsigned)img.pot_w, (unsigned)img.pot_h, (unsigned)rtt_no_vram_);
+@@ -4193,6 +4200,30 @@
+     // Out of the frame, just before C3D_FrameBegin (which would wait for the
+     // GPU anyway): render targets ensure_rtt replaced.
+     void retire_rtt_targets() {
++        // D36c (nexus): with kMaxRtt 8 the menus' images (four 128x512
++        // labels, 512 KB each) stay alive into the battle, where round robin
++        // over 4 slots used to replace them. When a target failed for VRAM,
++        // the least recently used one idle for kRttIdle frames goes, one per
++        // frame (the labels first; the portraits, sampled every frame, stay).
++        // Never without a failure: freeing idle targets always blacked out
++        // the portraits on the console (D50).
++        if (rtt_pressure_) {
++            rtt_pressure_ = false;
++            static constexpr uint32_t kRttIdle = 90;
++            int lru = -1;
++            for (int i = 0; i < rt64_3ds::kMaxRtt; i++) {
++                const RttTarget& t = rtt_[i];
++                if (t.rt == nullptr || frames_ - t.used_frame < kRttIdle) continue;
++                if (lru < 0 || t.used_frame < rtt_[lru].used_frame) lru = i;
++            }
++            if (lru >= 0) {
++                RttTarget& t = rtt_[lru];
++                retired_rtt_.push_back({ t.rt, t.tex });
++                t.rt = nullptr; t.w = t.h = 0;
++                t.fail_frame = ~0u;   // the failed target may be retried now
++                rtt_freed_++;
++            }
++        }
+         // D50b (nexus): no release of idle targets. On the console (console-4
+         // log) they failed twice, while releasing the idle ones blacked out
+         // the VS and battle portraits, which the game samples long after
+diff -ruN a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_record.h b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_record.h
+--- a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_record.h	2026-11-20 19:41:32.802609016 -0400
++++ b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_record.h	2026-11-20 19:41:32.961312520 -0400
+@@ -179,7 +179,14 @@
+     uint16_t width = 0;
+     uint16_t pot_w = 0, pot_h = 0;
+ };
+-constexpr int kMaxRtt = 4;
++// D36b (nexus): 16 (was 4). Pokemon Stadium 2 keeps more off-screen images
++// alive than 4: ten 118-wide labels on the team entry screen, the battle's
++// two portraits and its three new 320-wide framebuffers (drawn while the
++// screen was still 640 wide). With 4 slots, round robin, the framebuffers
++// took the 1P portrait's slot (it then read RDRAM: noise). A slot costs
++// VRAM only once drawn into; D36c frees the least recently used one when a
++// target fails for VRAM.
++constexpr int kMaxRtt = 16;
+ // Storage buffers the game copies presented frames into, each with a GPU copy
+ // of its own (Dinosaur Planet's effects keep two and the pause a third).
+ constexpr int kMaxSnapshots = 4;

@@ -1,0 +1,46 @@
+diff -ruN ta/tpak/tpak_3ds.cpp tb/tpak/tpak_3ds.cpp
+--- ta/tpak/tpak_3ds.cpp	2026-11-20 19:10:13.339714820 -0400
++++ tb/tpak/tpak_3ds.cpp	2026-11-20 19:10:13.356805516 -0400
+@@ -55,6 +55,15 @@
+     return f ? d : std::vector<uint8_t>{};
+ }
+ 
++// P46: auto_scan needs only the cart header (title at 0x134), not the whole
++// ROM (a GBC ROM is 2 MB, and the scan looked at each one three times).
++std::vector<uint8_t> read_head(const fs::path& p) {
++    std::ifstream f(p, std::ios::binary);
++    std::vector<uint8_t> d(0x150);
++    f.read(reinterpret_cast<char*>(d.data()), static_cast<std::streamsize>(d.size()));
++    return f ? d : std::vector<uint8_t>{};
++}
++
+ // Write to <p>.pending, then replace <p>. A .pending left by a cut write is
+ // checked on the next mount (see Cart::load).
+ bool write_atomic(const fs::path& p, const std::vector<uint8_t>& data) {
+@@ -609,7 +618,7 @@
+             std::string ext = it->path().extension().string();
+             for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
+             if (ext != ".gb" && ext != ".gbc") continue;
+-            const std::vector<uint8_t> r = read_file(it->path());
++            const std::vector<uint8_t> r = read_head(it->path());
+             if (r.size() < 0x150 || save_kind(r.data(), r.size()) == SaveKind::Unknown) continue;
+             here.push_back(it->path());
+         }
+@@ -621,7 +630,7 @@
+     static const char* const kVcName[] = {"Red", "Blue", "Yellow", "Gold", "Silver", "Crystal"};
+     bool have[6] = {};
+     for (const fs::path& r : found) {
+-        const std::vector<uint8_t> b = read_file(r);
++        const std::vector<uint8_t> b = read_head(r);
+         vc::Game g;
+         if (vc_game_of(b.data(), b.size(), g)) have[static_cast<int>(g)] = true;
+     }
+@@ -643,7 +652,7 @@
+         std::vector<fs::path> with_save, without;
+         bool taken[7] = {};
+         for (const fs::path& r : found) {
+-            const std::vector<uint8_t> b = read_file(r);
++            const std::vector<uint8_t> b = read_head(r);
+             vc::Game g;
+             const int gi = vc_game_of(b.data(), b.size(), g) ? static_cast<int>(g) : 6;
+             if (gi < 6 && taken[gi]) continue;

@@ -1,0 +1,16 @@
+diff -ruN a/platform/3ds/main_3ds.cpp b/platform/3ds/main_3ds.cpp
+--- a/platform/3ds/main_3ds.cpp	2026-11-20 08:11:54.676837147 -0400
++++ b/platform/3ds/main_3ds.cpp	2026-11-20 08:11:54.691228847 -0400
+@@ -241,6 +241,12 @@
+     // variant is known to match yet). Try audio_hle + AudioHle::Aspmain once
+     // the game boots and compare.
+     desc.audio_hle = false;
++    // D28: the audio task (~30 ms on core 1) is reported complete at once and
++    // run from a copy; its samples reach the host when it has really run. Its
++    // buffers go through recomp_ai_submit_buffer -> queue_audio_buffer, which
++    // holds them for that (Goemon does the same). Without it the scheduler
++    // keeps the graphics task back behind every audio task: ~4 VIs a frame.
++    desc.audio_async = true;
+     desc.button_map = kButtons;
+     desc.button_map_count = sizeof(kButtons) / sizeof(kButtons[0]);
+     desc.menu_defaults = kDefaults;

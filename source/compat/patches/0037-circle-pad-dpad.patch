@@ -1,0 +1,16 @@
+diff -ruN a/platform/3ds/main_3ds.cpp b/platform/3ds/main_3ds.cpp
+--- a/platform/3ds/main_3ds.cpp	2026-11-20 14:39:04.726096241 -0400
++++ b/platform/3ds/main_3ds.cpp	2026-11-20 14:39:04.740214241 -0400
+@@ -51,6 +51,12 @@
+     { KEY_DUP, N64_CUP }, { KEY_DDOWN | KEY_Y, N64_CDOWN }, { KEY_DLEFT, N64_CLEFT }, { KEY_DRIGHT, N64_CRIGHT },
+     { KEY_CSTICK_UP, N64_DUP }, { KEY_CSTICK_DOWN, N64_DDOWN },
+     { KEY_CSTICK_LEFT, N64_DLEFT }, { KEY_CSTICK_RIGHT, N64_DRIGHT },
++    // D39 (nexus): the S2's menus read only the D-pad, so the Circle Pad also
++    // presses it past the HID's own threshold (KEY_CPAD_* in hidKeysHeld; the
++    // AUTOTEST STICK_* keys set the same bits). The stick's analog value still
++    // goes to the game as before.
++    { KEY_CPAD_UP, N64_DUP }, { KEY_CPAD_DOWN, N64_DDOWN },
++    { KEY_CPAD_LEFT, N64_DLEFT }, { KEY_CPAD_RIGHT, N64_DRIGHT },
+ };
+ 
+ // D31b (nexus): the S1's GB Tower map (its scene 38): A, B, Y=Z, START,

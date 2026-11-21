@@ -1,0 +1,25 @@
+diff -ruN a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_tev.cpp b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_tev.cpp
+--- a/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_tev.cpp	2026-11-20 18:06:04.081033306 -0400
++++ b/BanjoRecomp3D/lib/rt64-3ds/src/renderer/rt64_3ds_tev.cpp	2026-11-20 18:06:04.102538907 -0400
+@@ -230,6 +230,21 @@
+     }
+ 
+     int cycles = (cyc == 1) ? 2 : 1;
++    if (cycles == 2 && d.tex[1].valid) {
++        // D46 (nexus): in 2-cycle mode the RDP's second cycle reads its
++        // TEXEL0 input from texel 1 and TEXEL1 from texel 0 (angrylion moves
++        // texel1 into texel0 between the cycles). Pokemon Stadium 2's names
++        // take the glyph's shape from TEXEL1 alpha in cycle 2 (cc 517e02
++        // 3f55ffff, glyph in tile 0, an I8 bar in tile 1): unswapped, every
++        // letter was the bar. Only with a second texture loaded, so a draw
++        // with one texture keeps reading it.
++        for (Src* s : { &a1, &b1, &c1, &d1, &Aa1, &Ab1, &Ac1, &Ad1 }) {
++            if (*s == S_TEX0) *s = S_TEX1;
++            else if (*s == S_TEX1) *s = S_TEX0;
++            else if (*s == S_TEX0_A) *s = S_TEX1_A;
++            else if (*s == S_TEX1_A) *s = S_TEX0_A;
++        }
++    }
+     for (int cy = 0; cy < cycles; cy++) {
+         Op rgb[2], alpha[2];
+         auto fr = [&](Src s) { return fold_const(s, false, k); };

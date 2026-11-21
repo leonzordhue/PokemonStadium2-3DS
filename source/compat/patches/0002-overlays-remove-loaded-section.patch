@@ -1,0 +1,45 @@
+diff --git a/librecomp/include/librecomp/overlays.hpp b/librecomp/include/librecomp/overlays.hpp
+index 35703bd..e6d00b0 100644
+--- a/librecomp/include/librecomp/overlays.hpp
++++ b/librecomp/include/librecomp/overlays.hpp
+@@ -44,6 +44,8 @@ namespace recomp {
+         size_t num_base_events();
+ 
+         void add_loaded_function(int32_t ram_addr, recomp_func_t* func);
++        void remove_loaded_section(size_t section_table_index, int32_t ram_addr);   // s2-3ds
++        void remove_loaded_function(int32_t ram_addr, recomp_func_t* func);        // s2-3ds: only if it still maps to func
+ 
+         struct BasePatchedFunction {
+             size_t patch_section;
+diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
+index 8c8e5d1..f14e0dc 100644
+--- a/librecomp/src/overlays.cpp
++++ b/librecomp/src/overlays.cpp
+@@ -150,6 +150,27 @@ void recomp::overlays::add_loaded_function(int32_t ram, recomp_func_t* func) {
+     func_map[ram] = func;
+ }
+ 
++// s2-3ds: exact removal of one loaded section instance (unload_overlays aborts on
++// partial/adjacent ranges) and of a single func_map entry, used by s2-3ds/compat.
++void recomp::overlays::remove_loaded_section(size_t section_table_index, int32_t ram) {
++    const SectionTableEntry& section = sections_info.code_sections[section_table_index];
++    auto it = std::find_if(loaded_sections.begin(), loaded_sections.end(), [&](const LoadedSection& s) {
++        return s.section_table_index == section_table_index && s.loaded_ram_addr == ram; });
++    if (it == loaded_sections.end()) return;
++    for (size_t function_index = 0; function_index < section.num_funcs; function_index++) {
++        const FuncEntry& func = section.funcs[function_index];
++        auto f = func_map.find(ram + func.offset);
++        if (f != func_map.end() && f->second == func.func) func_map.erase(f);
++    }
++    loaded_sections.erase(it);
++    if (section_addresses[section.index] == ram) section_addresses[section.index] = section.ram_addr;
++}
++
++void recomp::overlays::remove_loaded_function(int32_t ram, recomp_func_t* func) {
++    auto f = func_map.find(ram);
++    if (f != func_map.end() && f->second == func) func_map.erase(f);
++}
++
+ void load_overlay(size_t section_table_index, int32_t ram) {
+     const SectionTableEntry& section = sections_info.code_sections[section_table_index];
+ 

@@ -1,0 +1,41 @@
+--- s2-3ds/tpak/tpak_3ds.cpp.antes-0038
++++ s2-3ds/tpak/tpak_3ds.cpp
+@@ -488,6 +488,10 @@
+ // Relative cfg paths are relative to the base folder (D7 A9; the .3dsx CWD varies).
+ std::string resolve(const std::string& v) {
+     if (v.empty() || v.rfind("vc", 0) == 0) return v;
++    // P40: "sdmc:/..." (a device path, what auto_scan finds outside the base) is absolute on the 3DS,
++    // but std::filesystem sees no root in it and would put it under g_base.
++    const size_t colon = v.find(':');
++    if (colon != std::string::npos && colon < v.find('/')) return v;
+     const fs::path p(v);
+     return p.is_relative() ? (fs::path(g_base) / p).string() : v;
+ }
+--- s2-3ds/tpak/test_tpak.cpp.antes-0038
++++ s2-3ds/tpak/test_tpak.cpp
+@@ -206,6 +206,25 @@
+         tpak::set_base_dir(T.string());
+     }
+ 
++    // P40: on the console auto_scan finds "sdmc:/3ds/PokemonStadium/gb/Yellow Edition USA.gb" (S1 folder,
++    // space in the name); set_cart used to put that device path under the base dir -> "ROM file not found".
++    // Here "sdmc:" is a folder under the current directory, so the bug shows on the host too.
++    {
++        const fs::path old_cwd = fs::current_path();
++        const fs::path C = T / "cwd";
++        fs::create_directories(C / "sdmc:" / "3ds" / "PokemonStadium" / "gb");
++        fs::create_directories(C / "s2base");
++        wr(C / "sdmc:" / "3ds" / "PokemonStadium" / "gb" / "Yellow Edition USA.gb", red);
++        fs::current_path(C);
++        tpak::set_base_dir((C / "s2base").string());
++        tpak::load_config();
++        assert(tpak::has_pak(0));
++        assert(tpak::status() == "Cartridge connected");
++        assert(tpak::set_cart(0, "", ""));
++        fs::current_path(old_cwd);
++        tpak::set_base_dir(T.string());
++    }
++
+     fs::remove_all(T);
+     std::puts("tpak: todos os testes passaram");
+     return 0;

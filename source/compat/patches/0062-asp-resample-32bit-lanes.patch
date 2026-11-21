@@ -1,0 +1,66 @@
+--- s2-3ds/rsp-up/aspMain_ps2.cpp.antes-0062
++++ s2-3ds/rsp-up/aspMain_ps2.cpp
+@@ -63,11 +63,14 @@
+     a &= 0xFFF;
+     if (a > 0xFF4) { for (int k = 0; k < 4; k++) v[k] = s2_dh(a + 2 * k); return; }
+     const uint32_t b = a & ~3u, sh = (a & 3) * 8;
+-    uint32_t w0, w1, w2;
+-    memcpy(&w0, dmem + b, 4); memcpy(&w1, dmem + b + 4, 4); memcpy(&w2, dmem + b + 8, 4);
+-    uint64_t x = ((uint64_t)w0 << 32) | w1;
+-    if (sh) x = (x << sh) | (w2 >> (32 - sh));
+-    v[0] = (int16_t)(x >> 48); v[1] = (int16_t)(x >> 32); v[2] = (int16_t)(x >> 16); v[3] = (int16_t)x;
++    uint32_t w0, w1;
++    memcpy(&w0, dmem + b, 4); memcpy(&w1, dmem + b + 4, 4);
++    if (sh) {   // P50: 32-bit shifts (64-bit ones are slow on the ARM11)
++        uint32_t w2; memcpy(&w2, dmem + b + 8, 4);
++        w0 = (w0 << sh) | (w1 >> (32 - sh));
++        w1 = (w1 << sh) | (w2 >> (32 - sh));
++    }
++    v[0] = (int16_t)(w0 >> 16); v[1] = (int16_t)w0; v[2] = (int16_t)(w1 >> 16); v[3] = (int16_t)w1;
+ }
+ // P39: 8 halfwords at a 4-byte aligned address that does not wrap: host word k = N64 word (elements 2k, 2k+1).
+ static inline void s2_ld8(uint32_t a, int32_t* v) {
+@@ -1308,12 +1311,25 @@
+         uint16_t n22[8], n23[8], n21[8], n17[8], out[8];
+         for (;;) {
+             const int64_t base = (i7 << 16) + f7;              // VMUDM v31*v23[7] + VMADH v31*v22[7]
+-            for (int i = 0; i < 8; i++) {
+-                const int64_t acc = base + (int64_t)(2 * (i + 1)) * P;   // VMADM v25*P, v25 = 2,4..16
+-                n22[i] = (uint16_t)sat_mid(acc);
+-                n23[i] = sat_lo(acc);
+-                n21[i] = sat_lo(B + (int64_t)n22[i] * 2);
+-                n17[i] = sat_lo((int64_t)(uint16_t)((uint32_t)n23[i] * K >> 16) * 8 + T);
++            if (base >= -0x80000000LL && base + 16 * P <= 0x7FFFFFFFLL) {
++                // P50: every lane's accumulator fits in 32 bits (the usual case): no saturation can
++                // happen, so the middle/low slices are plain shifts and masks, all in 32 bits.
++                const int32_t b32 = (int32_t)base, p32 = (int32_t)P, B32 = (int32_t)B, T32 = (int32_t)T;
++                for (int i = 0; i < 8; i++) {
++                    const int32_t acc = b32 + 2 * (i + 1) * p32;
++                    n22[i] = (uint16_t)(acc >> 16);
++                    n23[i] = (uint16_t)acc;
++                    n21[i] = (uint16_t)(B32 + 2 * (int32_t)n22[i]);
++                    n17[i] = (uint16_t)((int32_t)((uint32_t)n23[i] * K >> 16) * 8 + T32);
++                }
++            } else {
++                for (int i = 0; i < 8; i++) {
++                    const int64_t acc = base + (int64_t)(2 * (i + 1)) * P;   // VMADM v25*P, v25 = 2,4..16
++                    n22[i] = (uint16_t)sat_mid(acc);
++                    n23[i] = sat_lo(acc);
++                    n21[i] = sat_lo(B + (int64_t)n22[i] * 2);
++                    n17[i] = sat_lo((int64_t)(uint16_t)((uint32_t)n23[i] * K >> 16) * 8 + T);
++                }
+             }
+             for (int l = 0; l < 8; l++) {
+                 int32_t p[4], sv[4], cv[4];
+@@ -1327,7 +1343,10 @@
+             }
+             sqv(r21, n21);
+             sqv(r20, n17);
+-            for (int i = 0; i < 8; i++) { sa[i] = (uint32_t)mh(r21 + 2 * i); ta[i] = (uint32_t)mh(r20 + 2 * i); }
++            if (((r21 | r20) & 15) == 0)   // P50: the scratch rows just stored whole: no read-back
++                for (int i = 0; i < 8; i++) { sa[i] = (uint32_t)(int32_t)(int16_t)n21[i]; ta[i] = (uint32_t)(int32_t)(int16_t)n17[i]; }
++            else
++                for (int i = 0; i < 8; i++) { sa[i] = (uint32_t)mh(r21 + 2 * i); ta[i] = (uint32_t)mh(r20 + 2 * i); }
+             r18 = RSP_ADD32(r18, -0X10);
+             sqv(r19, out);
+             f7 = n23[7]; i7 = (int16_t)n22[7];
