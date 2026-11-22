@@ -19,10 +19,15 @@ index 35703bd..e6d00b0 100644
          struct BasePatchedFunction {
              size_t patch_section;
 diff --git a/librecomp/include/librecomp/rsp.hpp b/librecomp/include/librecomp/rsp.hpp
-index 748558c..6179e44 100644
+index 748558c..866e2a7 100644
 --- a/librecomp/include/librecomp/rsp.hpp
 +++ b/librecomp/include/librecomp/rsp.hpp
-@@ -16,10 +16,15 @@ enum class RspExitReason {
+@@ -1,3 +1,4 @@
++#include <cstring>
+ #ifndef __RSP_H__
+ #define __RSP_H__
+ 
+@@ -16,10 +17,15 @@ enum class RspExitReason {
      UnhandledJumpTarget,
      Unsupported,
      SwapOverlay,
@@ -39,7 +44,7 @@ index 748558c..6179e44 100644
      uint32_t      r1,  r2,  r3,  r4,  r5,  r6,  r7,
               r8,  r9,  r10, r11, r12, r13, r14, r15,
               r16, r17, r18, r19, r20, r21, r22, r23,
-@@ -32,6 +37,23 @@ struct RspContext {
+@@ -32,6 +38,23 @@ struct RspContext {
      bool resume_delay;
  };
  
@@ -63,7 +68,48 @@ index 748558c..6179e44 100644
  using RspUcodeFunc = RspExitReason(uint8_t* rdram, uint32_t ucode_addr);
  
  extern uint8_t dmem[];
-@@ -91,24 +113,97 @@ static inline void RSP_MEM_H_STORE(uint32_t offset, uint32_t addr, uint32_t val)
+@@ -46,6 +69,8 @@ extern uint16_t rspInverseSquareRoots[512];
+ 
+ static inline uint32_t RSP_MEM_W_LOAD(uint32_t offset, uint32_t addr) {
+     uint32_t out;
++    // P61c [Proton]: aligned word = one 32-bit load (same bytes as the ^3 loop below).
++    if ((((offset) + (addr)) & 3u) == 0) { __builtin_memcpy(&out, dmem + (0xFFC & ((offset) + (addr))), 4); return out; }
+     for (int i = 0; i < 4; i++) {
+         reinterpret_cast<uint8_t*>(&out)[i ^ 3] = RSP_MEM_BU(offset + i, addr);
+     }
+@@ -53,6 +78,7 @@ static inline uint32_t RSP_MEM_W_LOAD(uint32_t offset, uint32_t addr) {
+ }
+ 
+ static inline void RSP_MEM_W_STORE(uint32_t offset, uint32_t addr, uint32_t val) {
++    if ((((offset) + (addr)) & 3u) == 0) { __builtin_memcpy(dmem + (0xFFC & ((offset) + (addr))), &val, 4); return; }   // P61c
+     for (int i = 0; i < 4; i++) {
+         RSP_MEM_BU(offset + i, addr) = reinterpret_cast<uint8_t*>(&val)[i ^ 3];
+     }
+@@ -60,6 +86,7 @@ static inline void RSP_MEM_W_STORE(uint32_t offset, uint32_t addr, uint32_t val)
+ 
+ static inline uint32_t RSP_MEM_HU_LOAD(uint32_t offset, uint32_t addr) {
+     uint16_t out;
++    if ((((offset) + (addr)) & 1u) == 0) { __builtin_memcpy(&out, dmem + (0xFFE & (((offset) + (addr)) ^ 2)), 2); return out; }   // P61c
+     for (int i = 0; i < 2; i++) {
+         reinterpret_cast<uint8_t*>(&out)[(i + 2) ^ 3] = RSP_MEM_BU(offset + i, addr);
+     }
+@@ -68,6 +95,7 @@ static inline uint32_t RSP_MEM_HU_LOAD(uint32_t offset, uint32_t addr) {
+ 
+ static inline uint32_t RSP_MEM_H_LOAD(uint32_t offset, uint32_t addr) {
+     int16_t out;
++    if ((((offset) + (addr)) & 1u) == 0) { __builtin_memcpy(&out, dmem + (0xFFE & (((offset) + (addr)) ^ 2)), 2); return out; }   // P61c
+     for (int i = 0; i < 2; i++) {
+         reinterpret_cast<uint8_t*>(&out)[(i + 2) ^ 3] = RSP_MEM_BU(offset + i, addr);
+     }
+@@ -75,6 +103,7 @@ static inline uint32_t RSP_MEM_H_LOAD(uint32_t offset, uint32_t addr) {
+ }
+ 
+ static inline void RSP_MEM_H_STORE(uint32_t offset, uint32_t addr, uint32_t val) {
++    if ((((offset) + (addr)) & 1u) == 0) { const uint16_t v = (uint16_t)val; __builtin_memcpy(dmem + (0xFFE & (((offset) + (addr)) ^ 2)), &v, 2); return; }   // P61c
+     for (int i = 0; i < 2; i++) {
+         RSP_MEM_BU(offset + i, addr) = reinterpret_cast<uint8_t*>(&val)[(i + 2) ^ 3];
+     }
+@@ -91,24 +120,113 @@ static inline void RSP_MEM_H_STORE(uint32_t offset, uint32_t addr, uint32_t val)
  
  #define SET_DMA_MEM(mem_addr) dma_mem_address = (mem_addr)
  #define SET_DMA_DRAM(dram_addr) dma_dram_address = (dram_addr)
@@ -108,7 +154,7 @@ index 748558c..6179e44 100644
 +#else
 +#define RSP_DMA_CHECK(w, m, d, l) ((void)0)
 +#endif
- 
++
 +#define DO_DMA_READ(rd_len) do { \
 +    uint32_t _rsp_dma_len_reg = (uint32_t)(rd_len); \
 +    RSP_DMA_CHECK(false, dma_mem_address, dma_dram_address, _rsp_dma_len_reg); \
@@ -123,7 +169,7 @@ index 748558c..6179e44 100644
 +    dma_mem_address  += rsp_dma_pbus_increment(_rsp_dma_len_reg); \
 +    dma_dram_address += rsp_dma_dram_increment(_rsp_dma_len_reg); \
 +} while (0)
-+
+ 
 +// s2-3ds P36: an asynchronous audio task runs after the game was told it had
 +// completed, and the game may have rebuilt its command list meanwhile. The
 +// task thread points these at the list as it was when the task was submitted
@@ -143,6 +189,15 @@ index 748558c..6179e44 100644
 +    uint32_t cur_dmem = dmem_addr & 0x0FF8u;
 +    uint32_t cur_dram = dram_addr & 0xFFFFF8u;
 +    for (uint32_t block = 0; block <= count; block++) {
++        // 0076 (nexus, P63): both sides keep bytes at (base + i) ^ 3 and both bases are 8-aligned here, so a block
++        // that neither wraps DMEM, leaves RDRAM nor touches the P36 list copy is the same bytes in the same order.
++        if (cur_dmem + block_len <= 0x1000u && cur_dram + block_len <= (uint32_t)RECOMP_MEM_MASK + 1u &&
++            (s2_alist_size == 0 || cur_dram + block_len <= s2_alist_base || cur_dram >= s2_alist_base + s2_alist_size)) {
++            std::memcpy(dmem + cur_dmem, rdram + cur_dram, block_len);
++            cur_dmem = (cur_dmem + block_len) & 0x0FFFu;
++            cur_dram = (cur_dram + block_len + (block != count ? skip : 0u)) & 0xFFFFF8u;
++            continue;
++        }
 +        for (uint32_t i = 0; i < block_len; i++) {
 +            const uint32_t s2_off = cur_dram + i - s2_alist_base;
 +            if (s2_off < s2_alist_size) RSP_MEM_B(i, cur_dmem) = (int8_t)s2_alist_bytes[s2_off ^ 3];
@@ -165,6 +220,13 @@ index 748558c..6179e44 100644
 +    uint32_t cur_dmem = dmem_addr & 0x0FF8u;
 +    uint32_t cur_dram = dram_addr & 0xFFFFF8u;
 +    for (uint32_t block = 0; block <= count; block++) {
++        // 0076 (nexus, P63): same bytes, same order (see dma_rdram_to_dmem).
++        if (cur_dmem + block_len <= 0x1000u && cur_dram + block_len <= (uint32_t)RECOMP_MEM_MASK + 1u) {
++            std::memcpy(rdram + cur_dram, dmem + cur_dmem, block_len);
++            cur_dmem = (cur_dmem + block_len) & 0x0FFFu;
++            cur_dram = (cur_dram + block_len + (block != count ? skip : 0u)) & 0xFFFFF8u;
++            continue;
++        }
 +        for (uint32_t i = 0; i < block_len; i++) {
 +            MEM_B(0, (int64_t)(int32_t)(cur_dram + i + 0x80000000)) = RSP_MEM_B(i, cur_dmem);
 +        }
@@ -207,13 +269,28 @@ index 97dbd8e..f20349c 100644
 +    MEM_W(0x0C, array) = 0;
 +}
 diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
-index 8c8e5d1..c1d444a 100644
+index 8c8e5d1..8f4d1c9 100644
 --- a/librecomp/src/overlays.cpp
 +++ b/librecomp/src/overlays.cpp
-@@ -150,6 +150,27 @@ void recomp::overlays::add_loaded_function(int32_t ram, recomp_func_t* func) {
-     func_map[ram] = func;
+@@ -37,6 +37,10 @@ static std::unordered_map<uint32_t, uint16_t> code_sections_by_rom{};
+ static std::unordered_map<uint32_t, uint16_t> patch_code_sections_by_rom{};
+ static std::vector<LoadedSection> loaded_sections{};
+ static std::unordered_map<int32_t, recomp_func_t*> func_map{};
++// 0101 [Claude]: per-thread direct-mapped cache in front of get_function; any func_map change bumps the generation.
++static uint32_t s2_fm_gen = 1;
++struct S2FmCacheEntry { int32_t addr; uint32_t gen; recomp_func_t* func; };
++static thread_local S2FmCacheEntry s2_fm_cache[1024];
+ static std::unordered_map<std::string, recomp_func_t*> base_exports{};
+ static std::unordered_map<std::string, recomp_func_ext_t*> ext_base_exports{};
+ static std::unordered_map<std::string, size_t> base_events;
+@@ -147,7 +151,28 @@ std::span<const RelocEntry> recomp::overlays::get_section_relocs(uint16_t code_s
  }
  
+ void recomp::overlays::add_loaded_function(int32_t ram, recomp_func_t* func) {
+-    func_map[ram] = func;
++    func_map[ram] = func; s2_fm_gen++;   // 0101
++}
++
 +// s2-3ds: exact removal of one loaded section instance (unload_overlays aborts on
 +// partial/adjacent ranges) and of a single func_map entry, used by s2-3ds/compat.
 +void recomp::overlays::remove_loaded_section(size_t section_table_index, int32_t ram) {
@@ -224,7 +301,7 @@ index 8c8e5d1..c1d444a 100644
 +    for (size_t function_index = 0; function_index < section.num_funcs; function_index++) {
 +        const FuncEntry& func = section.funcs[function_index];
 +        auto f = func_map.find(ram + func.offset);
-+        if (f != func_map.end() && f->second == func.func) func_map.erase(f);
++        if (f != func_map.end() && f->second == func.func) func_map.erase(f); s2_fm_gen++;   // 0101
 +    }
 +    loaded_sections.erase(it);
 +    if (section_addresses[section.index] == ram) section_addresses[section.index] = section.ram_addr;
@@ -232,13 +309,56 @@ index 8c8e5d1..c1d444a 100644
 +
 +void recomp::overlays::remove_loaded_function(int32_t ram, recomp_func_t* func) {
 +    auto f = func_map.find(ram);
-+    if (f != func_map.end() && f->second == func) func_map.erase(f);
-+}
-+
- void load_overlay(size_t section_table_index, int32_t ram) {
-     const SectionTableEntry& section = sections_info.code_sections[section_table_index];
++    if (f != func_map.end() && f->second == func) func_map.erase(f); s2_fm_gen++;   // 0101
+ }
  
-@@ -361,12 +382,39 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
+ void load_overlay(size_t section_table_index, int32_t ram) {
+@@ -155,7 +180,7 @@ void load_overlay(size_t section_table_index, int32_t ram) {
+ 
+     for (size_t function_index = 0; function_index < section.num_funcs; function_index++) {
+         const FuncEntry& func = section.funcs[function_index];
+-        func_map[ram + func.offset] = func.func;
++        func_map[ram + func.offset] = func.func; s2_fm_gen++;   // 0101
+     }
+ 
+     loaded_sections.emplace_back(ram, section_table_index);
+@@ -165,7 +190,7 @@ void load_overlay(size_t section_table_index, int32_t ram) {
+ static void load_special_overlay(const SectionTableEntry& section, int32_t ram) {
+     for (size_t function_index = 0; function_index < section.num_funcs; function_index++) {
+         const FuncEntry& func = section.funcs[function_index];
+-        func_map[ram + func.offset] = func.func;
++        func_map[ram + func.offset] = func.func; s2_fm_gen++;   // 0101
+     }
+ }
+ 
+@@ -215,7 +240,7 @@ extern "C" void unload_overlay_by_id(uint32_t id) {
+         for (size_t func_index = 0; func_index < section.num_funcs; func_index++) {
+             const auto& func = section.funcs[func_index];
+             uint32_t func_address = func.offset + find_it->loaded_ram_addr;
+-            func_map.erase(func_address);
++            func_map.erase(func_address); s2_fm_gen++;   // 0101
+         }
+         // Reset the section's address in the address table
+         section_addresses[section.index] = section.ram_addr;
+@@ -258,7 +283,7 @@ extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
+             for (size_t func_index = 0; func_index < section.num_funcs; func_index++) {
+                 const auto& func = section.funcs[func_index];
+                 uint32_t func_address = func.offset + it->loaded_ram_addr;
+-                func_map.erase(func_address);
++                func_map.erase(func_address); s2_fm_gen++;   // 0101
+             }
+             // Reset the section's address in the address table
+             section_addresses[section.index] = section.ram_addr;
+@@ -272,7 +297,7 @@ extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
+ }
+ 
+ void recomp::overlays::init_overlays() {
+-    func_map.clear();
++    func_map.clear(); s2_fm_gen++;   // 0101
+     section_addresses = (int32_t *)calloc(sections_info.total_num_sections, sizeof(int32_t));
+ 
+     // Sort the executable sections by rom address
+@@ -361,12 +386,42 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
      return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
  }
  
@@ -262,7 +382,10 @@ index 8c8e5d1..c1d444a 100644
 +
 +extern "C" uint32_t s2_translate_synthetic(uint32_t a);   // P53m (s2-3ds/compat/s2_compat.cpp)
  extern "C" recomp_func_t * get_function(int32_t addr) {
++    S2FmCacheEntry& ce = s2_fm_cache[((uint32_t)addr >> 2) & 1023u];   // 0101
++    if (ce.addr == addr && ce.gen == s2_fm_gen) return ce.func;
      auto func_find = func_map.find(addr);
++    if (func_find != func_map.end()) { ce.addr = addr; ce.gen = s2_fm_gen; ce.func = func_find->second; return ce.func; }
      if (func_find == func_map.end()) {
 -        fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
 -        assert(false);
@@ -426,10 +549,13 @@ index d3ca7cf..15aaa91 100644
  
  #endif
 diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
-index 9a0ec0f..f8479e2 100644
+index 9a0ec0f..e959f1d 100644
 --- a/ultramodern/src/events.cpp
 +++ b/ultramodern/src/events.cpp
-@@ -1,6 +1,7 @@
+@@ -1,6 +1,10 @@
++#ifdef __3DS__
++#include <3ds.h>
++#endif
  #include <thread>
  #include <atomic>
  #include <deque>
@@ -437,7 +563,7 @@ index 9a0ec0f..f8479e2 100644
  #include <mutex>
  #include <chrono>
  #include <cinttypes>
-@@ -151,6 +152,9 @@ ultramodern::renderer::ViRegs* ultramodern::renderer::get_vi_regs() {
+@@ -151,6 +155,9 @@ ultramodern::renderer::ViRegs* ultramodern::renderer::get_vi_regs() {
  
  extern "C" void osSetEventMesg(RDRAM_ARG OSEvent event_id, PTR(OSMesgQueue) mq_, OSMesg msg) {
      std::lock_guard lock{ events_context.message_mutex };
@@ -447,7 +573,7 @@ index 9a0ec0f..f8479e2 100644
  
      switch (event_id) {
          case OS_EVENT_SP:
-@@ -173,6 +177,9 @@ extern "C" void osSetEventMesg(RDRAM_ARG OSEvent event_id, PTR(OSMesgQueue) mq_,
+@@ -173,6 +180,9 @@ extern "C" void osSetEventMesg(RDRAM_ARG OSEvent event_id, PTR(OSMesgQueue) mq_,
  
  extern "C" void osViSetEvent(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, u32 retrace_count) {
      std::lock_guard lock{ events_context.message_mutex };
@@ -457,7 +583,7 @@ index 9a0ec0f..f8479e2 100644
      ViState* next_state = events_context.vi.get_next_state();
      next_state->mq = mq_;
      next_state->msg = msg;
-@@ -304,6 +311,11 @@ static std::atomic_uint32_t audio_submitted = 0;
+@@ -304,17 +314,69 @@ static std::atomic_uint32_t audio_submitted = 0;
  static std::atomic_uint32_t audio_completed = 0;
  static std::mutex async_audio_mutex;
  static std::deque<OSTask> async_audio_copies;
@@ -468,8 +594,42 @@ index 9a0ec0f..f8479e2 100644
 +static constexpr uint32_t kAlistMax = 0x10000;
  static OSTask async_audio_marker_storage;
  static OSTask* const async_audio_marker = &async_audio_marker_storage;
++// 0097 [Claude]: GB Tower video tasks run late and latest-only (a 3DS takes ~35 ms per task).
++static std::mutex s2_gb_async_mutex;
++static OSTask s2_gb_async_pending;
++static bool s2_gb_async_has = false;
++static uint32_t s2_gb_async_dropped = 0;
++static OSTask s2_gb_async_marker_storage;
++static OSTask* const s2_gb_async_marker = &s2_gb_async_marker_storage;
++// 0100 [Nexus]: the GB video ucode's input phase, done at submit time (see submit_rsp_task).
++static void s2_gb_entry_phase(uint8_t* rdram, const OSTask* task) {
++    const uint32_t src = (uint32_t)task->t.dram_stack & 0xFFFFF8u;          // DMEM 0xFE0
++    const uint32_t dst = (uint32_t)task->t.output_buff_size & 0xFFFFF8u;    // DMEM 0xFEC
++    static unsigned n_log = 0;
++    if (n_log < 3) {
++        n_log++;
++        fprintf(stderr, "[0100] GB task boot %lX: dram_stack %08lX output_buff %08lX output_buff_size %08lX data_ptr %08lX -> copy %06lX -> %06lX (0x6000)\n",
++                (unsigned long)task->t.ucode_boot_size, (unsigned long)(uint32_t)task->t.dram_stack, (unsigned long)(uint32_t)task->t.output_buff,
++                (unsigned long)(uint32_t)task->t.output_buff_size, (unsigned long)(uint32_t)task->t.data_ptr, (unsigned long)src, (unsigned long)dst);
++    }
++    if (src + 0x6000u > 0x1000000u || dst + 0x6000u > 0x1000000u) {
++        static unsigned n_bad = 0;
++        if (n_bad++ < 5) fprintf(stderr, "[0100] GB task input outside RDRAM (%06lX -> %06lX): input phase skipped\n", (unsigned long)src, (unsigned long)dst);
++        return;
++    }
++    // 6 blocks of 0x1000 through a scratch buffer, like the ucode's DMA in/out of DMEM 0 (same order if the ranges overlap).
++    static uint8_t blk[0x1000];
++    for (uint32_t k = 0; k < 0x6000u; k += 0x1000u) {
++        std::memcpy(blk, rdram + src + k, 0x1000);
++        std::memcpy(rdram + dst + k, blk, 0x1000);
++    }
++    // SIG3 on, as the ucode's 'mtc0 0x10000, SP_STATUS' through 0080's mirror (read bits 0x80 << n, n = 3).
++    uint32_t* st = reinterpret_cast<uint32_t*>(rdram + 0x040010);
++    *st = (*st & 0x7F80u) | 0x400u;
++}
  
-@@ -312,6 +324,13 @@ bool ultramodern::async_audio_tasks() { return async_audio; }
+ void ultramodern::set_async_audio_tasks(bool on) { async_audio = on; }
+ bool ultramodern::async_audio_tasks() { return async_audio; }
  uint32_t ultramodern::audio_tasks_submitted() { return audio_submitted; }
  uint32_t ultramodern::audio_tasks_completed() { return audio_completed; }
  
@@ -483,8 +643,40 @@ index 9a0ec0f..f8479e2 100644
  void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_ready) {
      ultramodern::set_native_thread_name("SP Task Thread");
      ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::Normal);
-@@ -332,22 +351,30 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
++#ifdef __3DS__
++    {   // 0102 [Nexus]: real core/priority of the SP Task Thread (spec is core 2, prio 0x24).
++        s32 p0102_p = -1;
++        svcGetThreadPriority(&p0102_p, CUR_THREAD_HANDLE);
++        fprintf(stderr, "[0102] SpTask core=%d prio=0x%lX\n", (int)svcGetProcessorID(), (unsigned long)p0102_p);
++    }
++#endif
+ 
+     // Notify the caller thread that this thread is ready.
+     thread_ready->signal();
+@@ -330,24 +392,52 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
+ 
+         // An asynchronous audio task (submit_rsp_task): its completion has
          // been reported; run the copy and hand over the samples waiting on it.
++        if (task == s2_gb_async_marker) {   // 0097
++            OSTask local;
++            {
++                std::lock_guard lock{ s2_gb_async_mutex };
++                if (!s2_gb_async_has) continue;
++                local = s2_gb_async_pending;
++                s2_gb_async_has = false;
++            }
++#ifdef __3DS__
++            // 0102 [Nexus]: render the GB frame below the game thread's priority (0x30), so it only takes idle CPU.
++            s32 p0102_prio = 0x24;
++            svcGetThreadPriority(&p0102_prio, CUR_THREAD_HANDLE);
++            svcSetThreadPriority(CUR_THREAD_HANDLE, 0x31);
++#endif
++            if (!ultramodern::rsp::run_task(PASS_RDRAM &local)) s2_task_failed(local.t.type);
++#ifdef __3DS__
++            svcSetThreadPriority(CUR_THREAD_HANDLE, p0102_prio);
++#endif
++            continue;
++        }
          if (task == async_audio_marker) {
              OSTask local;
 +            std::vector<uint8_t> list;
@@ -518,7 +710,12 @@ index 9a0ec0f..f8479e2 100644
          }
  
          // Tell the game that the RSP has completed
-@@ -640,6 +667,12 @@ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
+@@ -636,16 +726,38 @@ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
+         return;
+     }
+     // An asynchronous audio task: reported complete at once as well, and run by the task thread from a copy.
+-    if (task->t.type == M_AUDTASK && async_audio) {
++    if (task->t.type == M_AUDTASK && async_audio && (uint32_t)task->t.ucode_boot_size == 0x1000u) {   // 0085: GB Tower tasks are M_AUDTASK too
          {
              std::lock_guard lock{ async_audio_mutex };
              async_audio_copies.push_back(*task);
@@ -531,8 +728,30 @@ index 9a0ec0f..f8479e2 100644
          }
          audio_submitted++;
          sp_complete();
+         events_context.sp_task_queue.enqueue(async_audio_marker);
+         return;
+     }
++    // 0097: GB Tower video task: reported complete now; only the newest pending copy runs.
++    if (task->t.type == M_AUDTASK && ((uint32_t)task->t.ucode_boot_size == 0xA60u || (uint32_t)task->t.ucode_boot_size == 0xB30u)) {
++        bool queue_marker;
++        {
++            std::lock_guard lock{ s2_gb_async_mutex };
++            queue_marker = !s2_gb_async_has;
++            if (s2_gb_async_has && (++s2_gb_async_dropped <= 5 || s2_gb_async_dropped % 600 == 0))
++                fprintf(stderr, "[0097] GB video task dropped (#%lu)\n", (unsigned long)s2_gb_async_dropped);
++            s2_gb_async_pending = *task;
++            s2_gb_async_has = true;
++        }
++        s2_gb_entry_phase(rdram, task);   // 0100: the CPU goes on after the input copy, as on the N64
++        sp_complete();
++        if (queue_marker) events_context.sp_task_queue.enqueue(s2_gb_async_marker);
++        return;
++    }
+     // Set all other tasks as the RSP task
+     events_context.sp_task_queue.enqueue(task);
+ }
 diff --git a/ultramodern/src/host_thread.cpp b/ultramodern/src/host_thread.cpp
-index 9af1add..f643047 100644
+index 9af1add..8c042bc 100644
 --- a/ultramodern/src/host_thread.cpp
 +++ b/ultramodern/src/host_thread.cpp
 @@ -20,7 +20,9 @@ ultramodern::HostThreadSpec ultramodern::get_host_thread_spec(HostThreadKind kin
@@ -546,7 +765,7 @@ index 9af1add..f643047 100644
          case HostThreadKind::Gfx:     return { 256 * 1024, 0x2C, 2 };
          case HostThreadKind::SpTask:  return { 64 * 1024,  0x24, 2 };
          case HostThreadKind::Vi:
-@@ -46,12 +48,17 @@ static void host_thread_trampoline(void* arg) {
+@@ -46,12 +48,22 @@ static void host_thread_trampoline(void* arg) {
  ultramodern::HostThread::HostThread(HostThreadKind kind, std::function<void()> func) {
      HostThreadSpec spec = get_host_thread_spec(kind);
      auto* boxed = new std::function<void()>(std::move(func));
@@ -557,6 +776,11 @@ index 9af1add..f643047 100644
 +    // (shared with BanjoRecomp3D) gives them 128 KB, and the GB Tower's guest thread 8 overflowed that (P53r).
 +    if ((kind == HostThreadKind::Game || kind == HostThreadKind::GameStart) && stack_size < 512 * 1024) stack_size = 512 * 1024;
 +    thread_ = threadCreate(host_thread_trampoline, boxed, stack_size, spec.priority, spec.core, false);
++    if (thread_ == nullptr && spec.core == 2) {
++        // 0102 [Nexus]: core 2 refused; try core 3 before falling back to the default core.
++        fprintf(stderr, "[HostThread] core 2 refused for kind %d, trying core 3\n", (int)kind);
++        thread_ = threadCreate(host_thread_trampoline, boxed, stack_size, spec.priority, 3, false);
++    }
      if (thread_ == nullptr && spec.core != -2) {
          // The requested core may be unavailable (a .3dsx under the Homebrew
          // Launcher, or an Old 3DS): fall back to the default core.
@@ -567,7 +791,7 @@ index 9af1add..f643047 100644
      if (thread_ == nullptr) {
          fprintf(stderr, "[HostThread] threadCreate failed for kind %d (stack %zu)\n", (int)kind, spec.stack_size);
 diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
-index 10dc8a7..46fba32 100644
+index 10dc8a7..26a88aa 100644
 --- a/ultramodern/src/mesgqueue.cpp
 +++ b/ultramodern/src/mesgqueue.cpp
 @@ -6,6 +6,33 @@
@@ -625,7 +849,66 @@ index 10dc8a7..46fba32 100644
              if (to_send.requeue_if_blocked) requeued_messages.push_back(to_send);
          }
      }
-@@ -272,8 +306,25 @@ extern "C" s32 osRecvMesg(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, s32
+@@ -93,6 +127,50 @@ uint32_t ultramodern::set_int_mask(uint32_t mask) {
+     return old;
+ }
+ 
++// 0073 (nexus, P53): spin backoff, as the Stadium 1 3DS port does ("spin
++// backoff" / "spin demote" / "spin priority restored"). The 3DS does not
++// timeslice, and check_running_queue hands the turn back to the same game
++// thread while it stays the highest priority, so a thread that spins without
++// ever blocking (the GB Tower's core) never lets the others run. Counted here,
++// on each preemption check reached (one per external message: VI, timer, AI,
++// ...), not per loop checkpoint: with RECOMP_3DS_PREEMPT_CHECK the checkpoint
++// macro only calls in when the flag is up. Reset whenever the thread blocks
++// (ultramodern_spin_note_block, from wait_for_resumed).
++// shortcut: guest priority demoted to 1 (lowest non-idle) instead of "below the
++// lowest runnable"; upgrade if a game thread at priority 1 must also run.
++// The S2 port's last loop checkpoint (s2_link_3ds.cpp); weak so other games' links need none.
++extern "C" __attribute__((weak)) volatile uint32_t s2_last_loop_pc;
++static inline uint32_t spin_pc() { return &s2_last_loop_pc != nullptr ? s2_last_loop_pc : 0u; }
++static constexpr uint32_t kSpinChecks = 240;      // ~2-4 s of VI/AI messages without blocking
++thread_local uint32_t t_spin_checks = 0;
++thread_local int32_t t_spin_saved_pri = -1;
++
++extern "C" void ultramodern_spin_note_block(uint8_t* rdram) {
++    t_spin_checks = 0;
++    if (t_spin_saved_pri < 0 || ultramodern::this_thread() == NULLPTR) return;
++    OSThread* t = TO_PTR(OSThread, ultramodern::this_thread());
++    t->priority = t_spin_saved_pri;     // the thread is about to wait: no queue to reorder
++    fprintf(stderr, "spin priority restored: guest_id=%ld priority=%ld host=%ld\n",
++            (long)t->id, (long)t_spin_saved_pri, (long)0x30);
++    t_spin_saved_pri = -1;
++}
++
++static void spin_backoff_check(RDRAM_ARG1) {
++    if (++t_spin_checks < kSpinChecks || t_spin_saved_pri >= 0) return;
++    OSThread* t = TO_PTR(OSThread, ultramodern::this_thread());
++    fprintf(stderr, "spin backoff: pc=0x%08lX has run %lu checkpoints without blocking\n",
++            (unsigned long)spin_pc(), (unsigned long)t_spin_checks);
++    if (t->priority <= 1) { t_spin_checks = 0; return; }
++    t_spin_saved_pri = t->priority;
++    fprintf(stderr, "spin demote: pc=0x%08lX guest_id=%lu priority=%ld\n",
++            (unsigned long)spin_pc(), (unsigned long)t->id, (long)t->priority);
++    t_spin_checks = 0;
++    osSetThreadPri(PASS_RDRAM NULLPTR, 1);      // check_running_queue: another runnable thread takes over
++#ifdef __3DS__
++    svcSleepThread(1000000LL);                  // and the host threads below the game get 1 ms
++#endif
++}
++
+ extern "C" void ultramodern_preempt(uint8_t* rdram) {
+     // Only a game thread with a context can switch; the start-up code and
+     // host threads that run recompiled code pass through here too. A thread
+@@ -104,6 +182,7 @@ extern "C" void ultramodern_preempt(uint8_t* rdram) {
+     __atomic_store_n(ultramodern_preempt_flag, 0u, __ATOMIC_ACQ_REL);
+     dequeue_external_messages(PASS_RDRAM1);
+     ultramodern::check_running_queue(PASS_RDRAM1);
++    spin_backoff_check(PASS_RDRAM1);
+ }
+ 
+ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
+@@ -272,8 +351,25 @@ extern "C" s32 osRecvMesg(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, s32
      // Handle any messages that have been received from an external thread.
      dequeue_external_messages(PASS_RDRAM1);
  
@@ -651,3 +934,18 @@ index 10dc8a7..46fba32 100644
      
      // Check the queue to see if this thread should swap execution to another.
      ultramodern::check_running_queue(PASS_RDRAM1);
+diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
+index 11e167f..7325c73 100644
+--- a/ultramodern/src/threads.cpp
++++ b/ultramodern/src/threads.cpp
+@@ -240,7 +240,10 @@ void ultramodern::set_native_thread_priority(ThreadPriority pri) {}
+ 
+ extern "C" volatile uint32_t ultramodern_dbg_counts[8];
+ 
++extern "C" void ultramodern_spin_note_block(uint8_t* rdram);   // 0073 (nexus): mesgqueue.cpp
++
+ void wait_for_resumed(RDRAM_ARG UltraThreadContext* thread_context) {
++    ultramodern_spin_note_block(PASS_RDRAM1);   // 0073: blocked, the spin count starts over
+     load_stop(thread_context);
+     thread_context->running.wait();
+     ultramodern_dbg_counts[2] = ultramodern_dbg_counts[2] + 1;

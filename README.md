@@ -24,7 +24,7 @@ Port nativo do **Pokémon Stadium 2 (N64, versão americana)** para o **New Nint
 
 ## Situação atual
 
-**Versão beta.** Dá para jogar, com exceção da **GB Tower**.
+**Versão beta.** Dá para jogar o jogo inteiro, incluindo a **GB Tower**.
 
 | Parte do jogo | Situação |
 |---|---|
@@ -33,9 +33,9 @@ Port nativo do **Pokémon Stadium 2 (N64, versão americana)** para o **New Nint
 | Transfer Pak (Pokémon do Red/Blue/Yellow/Gold/Silver/Crystal) | ✅ Funciona |
 | Música e efeitos sonoros | ✅ Funciona |
 | 3D estereoscópico | ✅ Funciona (ajuste no slider) |
-| **GB Tower** (jogar o Game Boy dentro do Stadium) | ❌ **Ainda não funciona: o jogo trava ao entrar** |
+| **GB Tower** (jogar o Game Boy dentro do Stadium) | ✅ Funciona, com save real e som (testado com Pokémon Red e Crystal; pode ficar um pouco abaixo da velocidade normal) |
 
-Não entre na GB Tower nesta versão. Ela é a próxima a ser corrigida.
+A GB Tower usa as mesmas ROMs e saves de Game Boy do [Transfer Pak](#transfer-pak-pokémon-do-game-boy).
 
 ## O que você precisa
 
@@ -143,11 +143,8 @@ Não. Só nos modelos **New**.
 `sdmc:/3ds/PokemonStadium2/`. Faça backup dessa pasta antes de atualizar.
 
 ## Problemas conhecidos
-* **GB Tower trava ao entrar.** Em correção.
-* Numa batalha, logo depois que o Pokémon do adversário sai da Pokébola, pode piscar um quadro preto.
-* Na divisão da tela no começo da batalha pode aparecer uma linha preta por um instante.
-
-Os dois últimos já estão corrigidos e entram na próxima versão, junto com a GB Tower.
+* **GB Tower:** o jogo de Game Boy pode rodar um pouco abaixo da velocidade normal, e a imagem do Game Boy pode pular quadros (o 3DS desenha sempre o quadro mais recente).
+* Minigames, Pokémon Academy e Laboratório foram pouco testados: avise se achar problema.
 
 ## Compilando
 Não precisa compilar para jogar: use os arquivos dos [releases](../../releases). Para compilar a partir do código, veja [BUILDING.md](BUILDING.md). É um processo avançado e exige a sua ROM.

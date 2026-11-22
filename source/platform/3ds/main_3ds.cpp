@@ -27,6 +27,8 @@ static void s2_entrypoint(uint8_t* rdram, recomp_context* ctx) {
 }                     // generated/lookup.cpp
 extern RspUcodeFunc aspMain_ps2;                  // rsp/aspMain_ps2.cpp: the game's own audio microcode
 extern RspUcodeFunc njpgdspMain;                  // rsp/njpgdspMain.cpp: the JPEG task (Pokemon photos)
+extern RspUcodeFunc gbTowerS2B;                   // 0092: rsp/s2c/gbTowerS2B.cpp, GB ucode at ROM 0x15B44E0 (boot 0xB30, Crystal)
+extern RspUcodeFunc gbTowerS2C;                   // 0084: rsp/s2c/gbTowerS2C.cpp, the S2's real GB ucode (boot 0xA60)
 extern RspUcodeFunc gbTowerMain;                  // rsp/gbTowerMain.cpp: GB Tower (Game Boy on the RSP)
 extern RspUcodeFunc gbTowerColorMain;             // rsp/gbTowerColorMain.cpp: GB Tower, Game Boy Color
 
@@ -167,12 +169,14 @@ RspExitReason aspMain_ps2_diag(uint8_t* rdram, uint32_t ucode_addr) {
 
 RspUcodeFunc* get_rsp_microcode(const OSTask* task) {
     const uint32_t boot_size = (uint32_t)task->t.ucode_boot_size;
-    if (task->t.type != 1) {   // 0082 [Claude]: diagnostic, first 40 non-graphics tasks
+    if (boot_size != 0x1000u && boot_size != 0xD0u) {   // 0082c [Claude]: diagnostic, unusual boot sizes
         static unsigned n82;
-        if (n82 < 40) { n82++; fprintf(stderr, "[S2] task t%lu f%lX boot %08lX/%lX uc %08lX/%lX data %08lX/%lX\n",
-            (unsigned long)task->t.type, (unsigned long)task->t.flags, (unsigned long)task->t.ucode_boot, (unsigned long)boot_size,
+        if (++n82 <= 40 || n82 % 300 == 0) { fprintf(stderr, "[S2] task #%u t%lu f%lX boot %08lX/%lX uc %08lX/%lX data %08lX/%lX\n",
+            n82, (unsigned long)task->t.type, (unsigned long)task->t.flags, (unsigned long)task->t.ucode_boot, (unsigned long)boot_size,
             (unsigned long)task->t.ucode, (unsigned long)task->t.ucode_size, (unsigned long)task->t.data_ptr, (unsigned long)task->t.data_size); }
     }
+    if (task->t.ucode_boot != 0 && boot_size == 0xA60) { s2_gb_task_seen(); return gbTowerS2C; }   // 0084
+    if (task->t.ucode_boot != 0 && boot_size == 0xB30) { s2_gb_task_seen(); return gbTowerS2B; }   // 0092
     if (task->t.ucode_boot != 0 && boot_size == 0xA40) { s2_gb_task_seen(); return gbTowerMain; }
     if (task->t.ucode_boot != 0 && boot_size == 0x9E4) { s2_gb_task_seen(); return gbTowerColorMain; }
     switch (task->t.type) {

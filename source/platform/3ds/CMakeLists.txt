@@ -53,7 +53,7 @@ target_include_directories(RecompiledFuncs PRIVATE
     "${S2_GAME_DIR}/generated" "${CMAKE_CURRENT_LIST_DIR}" "${S2_ROOT}/compat" "${S2_RECOMP_INCLUDE}"
     "${RT64_3DS_NMR_DIR}/ultramodern/include" "${RT64_3DS_NMR_DIR}/librecomp/include")
 target_compile_options(RecompiledFuncs PRIVATE
-    -Os -fno-strict-aliasing -w -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration
+    -Os -funwind-tables -fno-strict-aliasing -w -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration
     -include "${CMAKE_CURRENT_LIST_DIR}/stadium2_host_protos.h")
 
 # Nexus 0018: funcs_65.c holds func_8AF233B4 (3,777 lines); -O2 ran past 30 min on it. Last -O wins.
@@ -75,6 +75,8 @@ add_executable(PokemonStadium2Recompiled3DS
     "${S2_GAME_DIR}/rsp/njpgdspMain.cpp"
     "${S2_GAME_DIR}/rsp/gbTowerMain.cpp"
     "${S2_GAME_DIR}/rsp/gbTowerColorMain.cpp"
+    "${S2_GAME_DIR}/rsp/s2c/gbTowerS2C.cpp"   # 0084
+    "${S2_GAME_DIR}/rsp/s2c/gbTowerS2B.cpp"   # 0092
     "${S2_GAME_DIR}/src/main/register_overlays.cpp"
 )
 target_include_directories(PokemonStadium2Recompiled3DS PRIVATE
@@ -85,6 +87,8 @@ target_compile_options(PokemonStadium2Recompiled3DS PRIVATE -O2 -Wno-unused-para
 set_source_files_properties(
     "${S2_ROOT}/rsp-up/aspMain_ps2.cpp" "${S2_GAME_DIR}/rsp/njpgdspMain.cpp"
     "${S2_GAME_DIR}/rsp/gbTowerMain.cpp" "${S2_GAME_DIR}/rsp/gbTowerColorMain.cpp"
+    "${S2_GAME_DIR}/rsp/s2c/gbTowerS2C.cpp"
+    "${S2_GAME_DIR}/rsp/s2c/gbTowerS2B.cpp"
     PROPERTIES COMPILE_OPTIONS "-O3;-fno-strict-aliasing;-w")
 target_link_libraries(PokemonStadium2Recompiled3DS PRIVATE
     recomp_3ds rt64_3ds RecompiledFuncs ultramodern librecomp citro3d ctru m)

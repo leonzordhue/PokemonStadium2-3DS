@@ -46,9 +46,11 @@ cmake -S s2-3ds-repo/tools/N64Recomp-s2 -B n64recomp-build -G Ninja -DCMAKE_BUIL
 ninja -C n64recomp-build
 cd pokemonStadiumGSRecomp
 ../n64recomp-build/N64Recomp game.toml          # gera generated/funcs_*.c
-for t in aspMain.ps2.us.toml rsp/gbTowerMain.us.rev1.toml rsp/gbTowerColorMain.us.rev1.toml; do
+for t in aspMain.ps2.us.toml rsp/gbTowerMain.us.rev1.toml rsp/gbTowerColorMain.us.rev1.toml \n         rsp/gbTowerS2C.us.toml rsp/gbTowerS2B.us.toml; do   # os dois últimos: vídeo do GB na GB Tower (rsp/s2c/)
   ../n64recomp-build/RSPRecomp "$t"
 done
+python3 ../s2-3ds-repo/tools/strip_watchdog.py rsp/s2c/gbTowerS2C.cpp rsp/s2c/gbTowerS2B.cpp   # tira o watchdog/pc_trail (mais rápido)
+python3 ../s2-3ds-repo/tools/p58_ai_hook.py generated   # som do jogo de GB na GB Tower
 cd ..
 mkdir -p s2-3ds/rsp-up && cp pokemonStadiumGSRecomp/rsp/*.cpp s2-3ds/rsp-up/   # confira o output_file_path de cada toml
 
@@ -65,5 +67,6 @@ Saída: `s2-3ds/build-3ds/PokemonStadium2Recompiled3DS.3dsx` e `.cia`.
 
 ## Observações
 * Os patches de `source/compat/patches/` estão numerados na ordem em que entraram. Os que já estão incorporados aos arquivos de `source/` não precisam ser aplicados de novo; eles ficam como histórico.
-* O código do port compila os `generated/funcs_*.c` em `-Os` para caber na memória do New 3DS.
+* O código do port compila os `generated/funcs_*.c` em `-Os` para caber na memória do New 3DS; os ucodes do RSP (`rsp-up/`, `rsp/s2c/`) vão em `-O3`.
+* Rode o `p58_ai_hook.py` de novo sempre que regenerar o `generated/`.
 * Não faça commit da ROM, do `generated/`, do `rsp-up/` nem de saves (o `.gitignore` já bloqueia).

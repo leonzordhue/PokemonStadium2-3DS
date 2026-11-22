@@ -19,3 +19,6 @@ build*/
 *.smdh
 *.o
 *.a
+
+# binários do release vão como assets no GitHub Releases
+release/

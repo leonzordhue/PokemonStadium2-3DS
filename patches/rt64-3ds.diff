@@ -97,10 +97,16 @@ index 7c2b6bb..da29aa1 100644
  const char* base_path();
  
 diff --git a/src/platform/recomp3ds_run.cpp b/src/platform/recomp3ds_run.cpp
-index 97ea798..f78e709 100644
+index 97ea798..ef4fd56 100644
 --- a/src/platform/recomp3ds_run.cpp
 +++ b/src/platform/recomp3ds_run.cpp
-@@ -15,6 +15,7 @@
+@@ -1,3 +1,5 @@
++#include <typeinfo>
++#include <exception>
+ // The 3DS entry point: console services, the runtime's callbacks, and the
+ // runtime itself. The game supplies a GameDesc; everything else is shared.
+ #include <3ds.h>
+@@ -15,6 +17,7 @@
  
  #include "librecomp/addresses.hpp"
  namespace recomp { uint32_t heap_rdram_address() __attribute__((weak)); }
@@ -108,7 +114,24 @@ index 97ea798..f78e709 100644
  #include "librecomp/game.hpp"
  #include "librecomp/rsp.hpp"
  #ifdef RECOMP_STATIC_MODS
-@@ -883,6 +884,15 @@ void update_gfx_inner() {
+@@ -421,7 +424,15 @@ void set_rosalina_menu_shut(bool shut) {
+ }
+ 
+ void on_new_failed() { fatal("out of memory (operator new failed)"); }
+-void on_terminate() { fatal("std::terminate (an uncaught exception or a failed new)"); }
++void on_terminate() {   // 0087: name the exception
++    if (std::exception_ptr e = std::current_exception()) {
++        try { std::rethrow_exception(e); }
++        catch (const std::exception& x) { fprintf(stderr, "recomp3ds: terminate: %s: %s\n", typeid(x).name(), x.what()); }
++        catch (...) { fprintf(stderr, "recomp3ds: terminate: non-std exception\n"); }
++    } else fprintf(stderr, "recomp3ds: terminate: no active exception\n");
++    fflush(stderr);
++    fatal("std::terminate (an uncaught exception or a failed new)");
++}
+ void on_exit_called() { fatal("exit() was called (an error exit; the message before it in the log says why)"); }
+ 
+ // Core 1's share for the application: APT takes up to 80%, PM (which
+@@ -883,6 +894,15 @@ void update_gfx_inner() {
                  st.dl_per_sec, want_fps, st.late_frames, st.max_gap_ms, busy0, busy1, core2, core3, ucode_ms, ucode_tasks, recomp3ds::audio_frames_queued(),
                  (unsigned long)ac.submitted, (unsigned long)ac.rate, (unsigned long)ac.underruns, (unsigned long)ac.dropped, (unsigned long)(ac.low_water == 0xFFFFFFFFu ? 0u : ac.low_water),
                  (unsigned long)(mallinfo().arena / 1024), rheap, hle_stats, hle_ms.c_str(), preempt_stats, rom_stats, game_stats, thread_stats.c_str());
@@ -124,7 +147,7 @@ index 97ea798..f78e709 100644
          // On a line of its own: the log cuts lines at 512 characters.
          if (log_stats && dsp_stats[0] != '\0') fprintf(stderr, "%s\n", dsp_stats + 1);
          // dbg_profile 2 or 3: the game's hottest functions, every 10 s whatever the log level.
-@@ -1445,6 +1455,13 @@ int recomp3ds::run(const GameDesc& desc) {
+@@ -1445,6 +1465,13 @@ int recomp3ds::run(const GameDesc& desc) {
              Thread probe3 = threadCreate([](void*) {}, nullptr, 4096, 0x30, 3, false);
              fprintf(stderr, "recomp3ds: a thread on core 3: %s\n", probe3 != nullptr ? "created" : "refused");
              if (probe3 != nullptr) { threadJoin(probe3, UINT64_MAX); threadFree(probe3); g_core3 = true; g_watch_cores |= 0x8; }
@@ -223,7 +246,7 @@ index eb134f9..eed89e0 100644
      // in-between frames get eye targets of their own (two more 240x400
      // colour + depth buffers: 1125 KB of VRAM at RGBA8/D16, taken last and
 diff --git a/src/renderer/rt64_3ds_context.cpp b/src/renderer/rt64_3ds_context.cpp
-index 5914095..4c043e1 100644
+index 5914095..a056e51 100644
 --- a/src/renderer/rt64_3ds_context.cpp
 +++ b/src/renderer/rt64_3ds_context.cpp
 @@ -34,6 +34,16 @@ extern "C" void C3Di_UpdateContext(void);
@@ -243,7 +266,71 @@ index 5914095..4c043e1 100644
  namespace {
  
  constexpr uint32_t kVboVerts = 65536;
-@@ -474,6 +484,7 @@ public:
+@@ -455,7 +465,62 @@ public:
+     bool update_config(const ultramodern::renderer::GraphicsConfig&, const ultramodern::renderer::GraphicsConfig&) override { return true; }
+     void enable_instant_present() override {}
+     void send_dummy_workload(uint32_t fb_address) { (void)fb_address; }
+-    void update_screen() override {}
++    // 0093 [Proton] (P53, GB Tower): a frame with NO display list (the GB Tower's gbTowerS2C/S2B microcode writes the
++    // framebuffer and the game swaps it with osViSwapBuffer) was never shown. Once no list has arrived for 3 VIs, put
++    // rdram[VI_ORIGIN] straight into the top screen's framebuffer. Frames with lists never take this path.
++    void update_screen() override {
++        if (list_seq_ != vi_last_seq_) { vi_last_seq_ = list_seq_; vi_idle_ = 0; return; }
++        if (!ok_ || g_quitting || g_paused || gpu_away()) return;
++        if (++vi_idle_ < 3) return;
++        present_vi_framebuffer();
++    }
++    uint32_t vi_last_seq_ = 0, vi_idle_ = 0, vi_blits_ = 0;
++    void present_vi_framebuffer() {
++        const ultramodern::renderer::ViRegs* vi = ultramodern::renderer::get_vi_regs();
++        const uint32_t type = vi->VI_STATUS_REG & 3u, origin = vi->VI_ORIGIN_REG & 0x00FFFFFFu, width = vi->VI_WIDTH_REG & 0xFFFu;
++        if (type < 2 || width == 0 || width > 640 || origin == 0 || origin >= 0x00800000u) return;
++        const int bpp_src = type == 3 ? 4 : 2;
++        const int src_w = (int)width, step = src_w > 320 ? 2 : 1;          // 640 wide: every other pixel and line
++        const int out_w = src_w / step, out_h = 240;
++        const int x0 = (400 - out_w) / 2;
++        const GSPGPU_FramebufferFormat fmt = gfxGetScreenFormat(GFX_TOP);
++        const int bpp = (int)gspGetBytesPerPixel(fmt);
++        const int eyes = gfxIs3D() ? 2 : 1;
++        for (int e = 0; e < eyes; e++) {
++            u16 fw = 0, fh = 0;
++            u8* fb = gfxGetFramebuffer(GFX_TOP, e ? GFX_RIGHT : GFX_LEFT, &fw, &fh);   // 240 rows per column, 400 columns
++            if (fb == nullptr || fw != 240 || fh < 400) continue;
++            for (int x = 0; x < 400; x++) {
++                const int sx = x - x0;
++                u8* col = fb + (size_t)x * 240 * bpp;
++                for (int y = 0; y < 240; y++) {
++                    uint32_t r = 0, g = 0, b = 0;
++                    if (sx >= 0 && sx < out_w && y < out_h) {
++                        const uint32_t a = origin + (uint32_t)(((y * step) * src_w + sx * step) * bpp_src);
++                        if (bpp_src == 2) {
++                            const uint16_t p = *(const uint16_t*)(rdram_ + ((a ^ 2u) & 0x00FFFFFEu));   // MEM_H byte order
++                            r = ((p >> 11) & 31u) << 3; g = ((p >> 6) & 31u) << 3; b = ((p >> 1) & 31u) << 3;
++                        } else {
++                            const uint32_t p = *(const uint32_t*)(rdram_ + (a & 0x00FFFFFCu));
++                            r = p >> 24; g = (p >> 16) & 255u; b = (p >> 8) & 255u;
++                        }
++                    }
++                    u8* d = col + (size_t)(239 - y) * bpp;
++                    switch (fmt) {
++                    case GSP_RGBA8_OES: d[0] = 255; d[1] = (u8)b; d[2] = (u8)g; d[3] = (u8)r; break;
++                    case GSP_BGR8_OES: d[0] = (u8)b; d[1] = (u8)g; d[2] = (u8)r; break;
++                    case GSP_RGB565_OES: { const u16 v = (u16)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)); d[0] = (u8)v; d[1] = (u8)(v >> 8); break; }
++                    default: { const u16 v = (u16)(((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | 1u); d[0] = (u8)v; d[1] = (u8)(v >> 8); break; }
++                    }
++                }
++            }
++        }
++        gfxFlushBuffers();
++        gfxScreenSwapBuffers(GFX_TOP, eyes == 2);
++        if (vi_blits_++ < 3)
++            fprintf(stderr, "rt64-3ds: 0093 VI blit (no list for %lu VIs): origin %06lx width %lu type %lu fmt %d eyes %d\n",
++                    (unsigned long)vi_idle_, (unsigned long)origin, (unsigned long)width, (unsigned long)type, (int)fmt, eyes);
++    }
+     // Runs on the gfx thread when the runtime quits: let the GPU finish what
+     // it was given and give citro3d's hooks and queues back before the
+     // process closes (C3D_Fini waits for the render queue).
+@@ -474,6 +539,7 @@ public:
      float get_resolution_scale() const override { return 1.0f; }
  
      void send_dl(const OSTask* task) override {
@@ -251,7 +338,7 @@ index 5914095..4c043e1 100644
          if (!ok_ || g_quitting) return;
          // Hold the game while the GPU is away (it would only run ahead unseen)
          // or a prompt has it paused.
-@@ -796,6 +807,10 @@ public:
+@@ -796,6 +862,10 @@ public:
              g_stats.late_frames = (int)late_;
              g_stats.max_gap_ms = max_gap_;
              late_ = 0;
@@ -262,7 +349,7 @@ index 5914095..4c043e1 100644
              max_gap_ = 0;
              // Times per list drawn (the frame cap's passed-over lists apart).
              const uint32_t drawn = dl_count_ - passed_count_;
-@@ -1144,6 +1159,8 @@ public:
+@@ -1144,6 +1214,8 @@ public:
          return present ? ReadOutcome::Drawn : ReadOutcome::NotDrawn;
      }
      void tell_parsed(uint32_t data_ptr, ReadOutcome read) {
@@ -271,7 +358,7 @@ index 5914095..4c043e1 100644
          ultramodern::extensions::on_displaylist_parsed(data_ptr);
          // RenderDesc::early_drawn: and drawn, so a game that waits for that
          // before its next frame does not wait for the screen below too. With
-@@ -1387,6 +1404,12 @@ private:
+@@ -1387,6 +1459,12 @@ private:
              flush_dcache(white_.data, 8 * 8 * 2);
              C3D_TexSetFilter(&white_, GPU_NEAREST, GPU_NEAREST);
          }
@@ -284,7 +371,7 @@ index 5914095..4c043e1 100644
  
          // The snapshot texture: the 240x400 colour buffer copied whole into
          // a 256x512 RGBA8 texture (same tiling, rows padded), for the game's
-@@ -1466,6 +1489,7 @@ private:
+@@ -1466,6 +1544,7 @@ private:
              }
              interp_.set_gbi(desc.gbi);
              interp_.set_render_to_texture(desc.render_to_texture);
@@ -292,7 +379,7 @@ index 5914095..4c043e1 100644
              interp_.set_sample_drawn_frame(desc.sample_drawn_frame);
              interp_.set_primary_world_instance(desc.primary_world_instance);
              interp_.set_unify_world_depth(desc.unify_world_depth);
-@@ -1663,8 +1687,12 @@ private:
+@@ -1663,8 +1742,12 @@ private:
          // rectangle becomes the eyes' clear value, and is not drawn.
          u32 clear_value = eye_clear_;
          const int fill_skip = (!offscreen_frame && fill_clear_) ? leading_fill(sfd, &clear_value) : -1;
@@ -306,7 +393,7 @@ index 5914095..4c043e1 100644
              draw_on(cur_eye_[0]);
          }
          cur_target_ = offscreen_frame ? -2 : -1;
-@@ -1726,7 +1754,7 @@ private:
+@@ -1726,7 +1809,7 @@ private:
          if (pass == 1) {
              // The right eye: same records, same state, the other shift.
              tl_split = svcGetSystemTick();
@@ -315,7 +402,7 @@ index 5914095..4c043e1 100644
              draw_on(cur_eye_[1]);
              cur_target_ = -1;
              frame_viewport_ = false;
-@@ -2960,7 +2988,19 @@ private:
+@@ -2960,7 +3043,19 @@ private:
              else if (d.tex[t].valid && d.tex[t].rtt >= 0) {
                  // An off-screen image drawn on the GPU (this frame or earlier).
                  RttTarget& rt = rtt_[d.tex[t].rtt];
@@ -336,7 +423,7 @@ index 5914095..4c043e1 100644
                      if (&rt.tex != last_tex_[t]) {
                          C3D_TexBind(t, &rt.tex);
                          last_tex_[t] = &rt.tex; last_tex_param_[t] = 0xFFFFFFFEu;
-@@ -2990,9 +3030,14 @@ private:
+@@ -2990,9 +3085,14 @@ private:
                      bound = true;
                  }
              }
@@ -354,7 +441,7 @@ index 5914095..4c043e1 100644
              }
          }
          if (us != last_us_ || vs != last_vs_) {
-@@ -3137,6 +3182,10 @@ private:
+@@ -3137,6 +3237,10 @@ private:
          // The original game's own full-width scissor is stretched to the wide
          // screen: the patched projection already fills it.
          if (d.scissor[0] <= 0 && d.scissor[2] >= geo_.w) { x0 = 0; x1 = 400; }
@@ -365,7 +452,7 @@ index 5914095..4c043e1 100644
          if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > 400) x1 = 400; if (y1 > 240) y1 = 240;
          // Mtx_OrthoTilt maps screen y = 0 to framebuffer x = 240 and the
          // screen's left edge to framebuffer y = 400: both axes run backwards.
-@@ -3852,6 +3901,43 @@ public:
+@@ -3852,6 +3956,43 @@ public:
                  if (frame_.draws[i].screen == 0 && rt64_3ds::stretch_tint_quad(frame_.draws[i], frame_.verts.data(), geo_)) tint_[i] = 1;
              }
          }
@@ -409,7 +496,7 @@ index 5914095..4c043e1 100644
          if (!sf.on) return;
          const rt64_3ds::Vtx3ds* verts = frame_.verts.data();
          // RenderDesc::infinity_rect_cover_zoom. The vertices are recorded
-@@ -4005,6 +4091,8 @@ public:
+@@ -4005,6 +4146,8 @@ public:
              read_geo_ = rt64_3ds::ScreenGeometry::make(fs.w, fs.h, desc.display_aspect);
              interp_.set_screen(read_geo_);
              fprintf(stderr, "rt64-3ds: VI width %u: lists read at %dx%d from here\n", width, read_geo_.w, read_geo_.h);
@@ -418,7 +505,7 @@ index 5914095..4c043e1 100644
              return;
          }
          if (width != vi_width_logged_) {
-@@ -4077,10 +4165,14 @@ public:
+@@ -4077,10 +4220,14 @@ public:
          uint16_t w = 0, h = 0;
          C3D_Mtx proj{};
          uint32_t clear_frame = ~0u;
@@ -433,7 +520,7 @@ index 5914095..4c043e1 100644
      int cur_target_ = -1;                        // the RTT slot drawn into, -1 = the eye
      RttTarget* ensure_rtt(int i) {
          const rt64_3ds::RttImage& img = frame_.rtts[i];
-@@ -4090,23 +4182,39 @@ public:
+@@ -4090,23 +4237,39 @@ public:
              // the GPU may still read it): retire it until the next frame start.
              if (t.rt != nullptr) { retired_rtt_.push_back({ t.rt, t.tex }); t.rt = nullptr; }
              if (img.pot_w == 0 || img.pot_h == 0) return nullptr;
@@ -482,7 +569,7 @@ index 5914095..4c043e1 100644
              t.w = img.pot_w; t.h = img.pot_h;
              C3D_TexSetFilter(&t.tex, GPU_LINEAR, GPU_LINEAR);
              C3D_TexSetWrap(&t.tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
-@@ -4125,6 +4233,7 @@ public:
+@@ -4125,6 +4288,7 @@ public:
              clear_target(t.rt, C3D_CLEAR_ALL, 0x000000FF);
              t.clear_frame = frames_;
          }
@@ -490,7 +577,7 @@ index 5914095..4c043e1 100644
          return &t;
      }
      struct RetiredRtt { C3D_RenderTarget* rt; C3D_Tex tex; };
-@@ -4132,6 +4241,34 @@ public:
+@@ -4132,6 +4296,34 @@ public:
      // Out of the frame, just before C3D_FrameBegin (which would wait for the
      // GPU anyway): render targets ensure_rtt replaced.
      void retire_rtt_targets() {
@@ -525,7 +612,7 @@ index 5914095..4c043e1 100644
          for (RetiredRtt& r : retired_rtt_) { C3D_RenderTargetDelete(r.rt); C3D_TexDelete(&r.tex); }
          retired_rtt_.clear();
      }
-@@ -4880,6 +5017,7 @@ public:
+@@ -4880,6 +5072,7 @@ public:
      uint8_t* capture_copy_ = nullptr;
      OSTask capture_task_{};
      C3D_Tex white_{};
