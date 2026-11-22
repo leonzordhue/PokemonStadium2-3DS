@@ -549,7 +549,7 @@ index d3ca7cf..15aaa91 100644
  
  #endif
 diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
-index 9a0ec0f..e959f1d 100644
+index 9a0ec0f..2491b51 100644
 --- a/ultramodern/src/events.cpp
 +++ b/ultramodern/src/events.cpp
 @@ -1,6 +1,10 @@
@@ -732,7 +732,7 @@ index 9a0ec0f..e959f1d 100644
          return;
      }
 +    // 0097: GB Tower video task: reported complete now; only the newest pending copy runs.
-+    if (task->t.type == M_AUDTASK && ((uint32_t)task->t.ucode_boot_size == 0xA60u || (uint32_t)task->t.ucode_boot_size == 0xB30u)) {
++    if (task->t.type == M_AUDTASK && ((uint32_t)task->t.ucode_boot_size == 0xA60u || (uint32_t)task->t.ucode_boot_size == 0xB30u || (uint32_t)task->t.ucode_boot_size == 0xA10u /* 0103 */)) {
 +        bool queue_marker;
 +        {
 +            std::lock_guard lock{ s2_gb_async_mutex };

@@ -27,6 +27,7 @@ static void s2_entrypoint(uint8_t* rdram, recomp_context* ctx) {
 }                     // generated/lookup.cpp
 extern RspUcodeFunc aspMain_ps2;                  // rsp/aspMain_ps2.cpp: the game's own audio microcode
 extern RspUcodeFunc njpgdspMain;                  // rsp/njpgdspMain.cpp: the JPEG task (Pokemon photos)
+extern RspUcodeFunc gbTowerS2A;                   // 0103: rsp/s2c/gbTowerS2A.cpp, GB ucode at ROM 0x15B3A10 (boot 0xA10, Yellow)
 extern RspUcodeFunc gbTowerS2B;                   // 0092: rsp/s2c/gbTowerS2B.cpp, GB ucode at ROM 0x15B44E0 (boot 0xB30, Crystal)
 extern RspUcodeFunc gbTowerS2C;                   // 0084: rsp/s2c/gbTowerS2C.cpp, the S2's real GB ucode (boot 0xA60)
 extern RspUcodeFunc gbTowerMain;                  // rsp/gbTowerMain.cpp: GB Tower (Game Boy on the RSP)
@@ -177,6 +178,7 @@ RspUcodeFunc* get_rsp_microcode(const OSTask* task) {
     }
     if (task->t.ucode_boot != 0 && boot_size == 0xA60) { s2_gb_task_seen(); return gbTowerS2C; }   // 0084
     if (task->t.ucode_boot != 0 && boot_size == 0xB30) { s2_gb_task_seen(); return gbTowerS2B; }   // 0092
+    if (task->t.ucode_boot != 0 && boot_size == 0xA10) { s2_gb_task_seen(); return gbTowerS2A; }   // 0103
     if (task->t.ucode_boot != 0 && boot_size == 0xA40) { s2_gb_task_seen(); return gbTowerMain; }
     if (task->t.ucode_boot != 0 && boot_size == 0x9E4) { s2_gb_task_seen(); return gbTowerColorMain; }
     switch (task->t.type) {

@@ -91,18 +91,18 @@ index 63bb9ac..d29ac40 100644
      recomp::overlays::overlay_section_table_data_t sections {
          .code_sections     = section_table,
          .num_code_sections = ARRLEN(section_table),
-diff --git a/rsp/gbTowerS2C.us.toml b/rsp/gbTowerS2C.us.toml
-new file mode 100644
-index 0000000..7d46a2b
+diff --git a/rsp/gbTowerS2A.us.toml b/rsp/gbTowerS2A.us.toml
+new file mode 100755
+index 0000000..793c6bc
 --- /dev/null
-+++ b/rsp/gbTowerS2C.us.toml
++++ b/rsp/gbTowerS2A.us.toml
 @@ -0,0 +1,6 @@
-+text_offset = 0x15B50D0
-+text_size = 0xA60
++text_offset = 0x15B3A10
++text_size = 0xA10
 +text_address = 0x04001000
 +rom_file_path = "../baserom.z64"
-+output_file_path = "s2c/gbTowerS2C.cpp"
-+output_function_name = "gbTowerS2C"
++output_file_path = "s2c/gbTowerS2A.cpp"
++output_function_name = "gbTowerS2A"
 diff --git a/rsp/gbTowerS2B.us.toml b/rsp/gbTowerS2B.us.toml
 new file mode 100644
 index 0000000..c50cbbe
@@ -115,3 +115,15 @@ index 0000000..c50cbbe
 +rom_file_path = "../baserom.z64"
 +output_file_path = "s2c/gbTowerS2B.cpp"
 +output_function_name = "gbTowerS2B"
+diff --git a/rsp/gbTowerS2C.us.toml b/rsp/gbTowerS2C.us.toml
+new file mode 100644
+index 0000000..7d46a2b
+--- /dev/null
++++ b/rsp/gbTowerS2C.us.toml
+@@ -0,0 +1,6 @@
++text_offset = 0x15B50D0
++text_size = 0xA60
++text_address = 0x04001000
++rom_file_path = "../baserom.z64"
++output_file_path = "s2c/gbTowerS2C.cpp"
++output_function_name = "gbTowerS2C"

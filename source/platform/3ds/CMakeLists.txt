@@ -77,6 +77,7 @@ add_executable(PokemonStadium2Recompiled3DS
     "${S2_GAME_DIR}/rsp/gbTowerColorMain.cpp"
     "${S2_GAME_DIR}/rsp/s2c/gbTowerS2C.cpp"   # 0084
     "${S2_GAME_DIR}/rsp/s2c/gbTowerS2B.cpp"   # 0092
+    "${S2_GAME_DIR}/rsp/s2c/gbTowerS2A.cpp"   # 0103
     "${S2_GAME_DIR}/src/main/register_overlays.cpp"
 )
 target_include_directories(PokemonStadium2Recompiled3DS PRIVATE
@@ -89,6 +90,7 @@ set_source_files_properties(
     "${S2_GAME_DIR}/rsp/gbTowerMain.cpp" "${S2_GAME_DIR}/rsp/gbTowerColorMain.cpp"
     "${S2_GAME_DIR}/rsp/s2c/gbTowerS2C.cpp"
     "${S2_GAME_DIR}/rsp/s2c/gbTowerS2B.cpp"
+    "${S2_GAME_DIR}/rsp/s2c/gbTowerS2A.cpp"
     PROPERTIES COMPILE_OPTIONS "-O3;-fno-strict-aliasing;-w")
 target_link_libraries(PokemonStadium2Recompiled3DS PRIVATE
     recomp_3ds rt64_3ds RecompiledFuncs ultramodern librecomp citro3d ctru m)

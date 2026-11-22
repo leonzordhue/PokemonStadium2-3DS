@@ -46,10 +46,11 @@ cmake -S s2-3ds-repo/tools/N64Recomp-s2 -B n64recomp-build -G Ninja -DCMAKE_BUIL
 ninja -C n64recomp-build
 cd pokemonStadiumGSRecomp
 ../n64recomp-build/N64Recomp game.toml          # gera generated/funcs_*.c
-for t in aspMain.ps2.us.toml rsp/gbTowerMain.us.rev1.toml rsp/gbTowerColorMain.us.rev1.toml \n         rsp/gbTowerS2C.us.toml rsp/gbTowerS2B.us.toml; do   # os dois últimos: vídeo do GB na GB Tower (rsp/s2c/)
+for t in aspMain.ps2.us.toml rsp/gbTowerMain.us.rev1.toml rsp/gbTowerColorMain.us.rev1.toml \
+         rsp/gbTowerS2A.us.toml rsp/gbTowerS2B.us.toml rsp/gbTowerS2C.us.toml; do   # S2A/S2B/S2C: vídeo do GB na GB Tower (rsp/s2c/)
   ../n64recomp-build/RSPRecomp "$t"
 done
-python3 ../s2-3ds-repo/tools/strip_watchdog.py rsp/s2c/gbTowerS2C.cpp rsp/s2c/gbTowerS2B.cpp   # tira o watchdog/pc_trail (mais rápido)
+python3 ../s2-3ds-repo/tools/strip_watchdog.py rsp/s2c/gbTowerS2*.cpp   # tira o watchdog/pc_trail (mais rápido)
 python3 ../s2-3ds-repo/tools/p58_ai_hook.py generated   # som do jogo de GB na GB Tower
 cd ..
 mkdir -p s2-3ds/rsp-up && cp pokemonStadiumGSRecomp/rsp/*.cpp s2-3ds/rsp-up/   # confira o output_file_path de cada toml
