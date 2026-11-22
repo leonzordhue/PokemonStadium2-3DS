@@ -143,6 +143,7 @@ Não. Só nos modelos **New**.
 `sdmc:/3ds/PokemonStadium2/`. Faça backup dessa pasta antes de atualizar.
 
 ## Problemas conhecidos
+* **GB Tower com Pokémon Yellow trava** nesta versão (o Yellow usa um microcódigo de vídeo diferente). A correção entra na próxima versão.
 * **GB Tower:** o jogo de Game Boy pode rodar um pouco abaixo da velocidade normal, e a imagem do Game Boy pode pular quadros (o 3DS desenha sempre o quadro mais recente).
 * Minigames, Pokémon Academy e Laboratório foram pouco testados: avise se achar problema.
 
