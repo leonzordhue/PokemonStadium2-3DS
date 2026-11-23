@@ -81,7 +81,7 @@ volatile uint64_t g_gb_task_tick = 0;   // svcGetSystemTick of the last GB Tower
 volatile bool g_gb_map = false;
 void s2_gb_task_seen() {
     g_gb_task_tick = svcGetSystemTick();
-    if (!g_gb_map) { g_gb_map = true; input_set_map(kGbTower, sizeof(kGbTower) / sizeof(kGbTower[0])); }
+    if (!g_gb_map) { g_gb_map = true; recomp3ds::g_select_to_game = true; input_set_map(kGbTower, sizeof(kGbTower) / sizeof(kGbTower[0])); }   // 0104
 }
 
 const MenuDefault kDefaults[] = {
@@ -208,6 +208,7 @@ void tpak_flush_loop(void*) {
         tpak::flush_all();
         if (g_gb_map && svcGetSystemTick() - g_gb_task_tick > SYSCLOCK_ARM11) {   // left the GB Tower
             g_gb_map = false;
+            recomp3ds::g_select_to_game = false;   // 0104
             input_set_map(kButtons, sizeof(kButtons) / sizeof(kButtons[0]));
         }
         static uint32_t last = 0;   // boot-hang diagnosis: where the game loops
@@ -371,3 +372,7 @@ int main(int argc, char** argv) {
     tpak::flush_all(true);
     return code;
 }
+
+// 0106 [Proton]: g_gb_task_tick lives in an anonymous namespace; rt64-3ds (0105, D66 v2) reads it through this
+// external-linkage function, declared weak there.
+extern "C" uint64_t s2_gb_task_tick_now() { return g_gb_task_tick; }

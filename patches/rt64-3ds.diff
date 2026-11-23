@@ -1,5 +1,18 @@
+diff --git a/cia/template.rsf b/cia/template.rsf
+index a09a0be..48bc744 100644
+--- a/cia/template.rsf
++++ b/cia/template.rsf
+@@ -30,7 +30,7 @@ Option:
+   FreeProductCode         : true # Removes limitations on ProductCode
+   MediaFootPadding        : false # If true CCI files are created with padding
+   EnableCrypt             : false # Enables encryption for NCCH and CIA
+-  EnableCompress          : true # Compresses where applicable (currently only exefs:/.code)
++  EnableCompress          : false # Compresses where applicable (currently only exefs:/.code)
+   
+ AccessControlInfo:
+   CoreVersion                   : 2
 diff --git a/src/platform/log.cpp b/src/platform/log.cpp
-index b97fe8c..8e7c9c1 100644
+index b97fe8c..702e5dd 100644
 --- a/src/platform/log.cpp
 +++ b/src/platform/log.cpp
 @@ -105,9 +105,13 @@ bool drain_ring() {
@@ -72,11 +85,28 @@ index b97fe8c..8e7c9c1 100644
  void recomp3ds::screen_flush() {
      if (!g_screen_dirty) return;
      g_screen_dirty = false;
+@@ -388,6 +408,16 @@ void recomp3ds::log_start_writer() {
+ // write stuck) is left alone, and so is the file: draining the ring here
+ // too would share its chunk buffer and FILE with it, and block this thread
+ // (the exit) on the same card.
++// 0109 [Claude]: the exit's last word: flushed, then the file closed and dropped, so a line another thread logs
++// after the SD is unmounted (__appExit) goes nowhere instead of into a dead devoptab.
++void recomp3ds::log_close() {
++    recomp3ds::log_flush();
++    if (g_writer != nullptr) return;   // stuck writer: leave its FILE alone
++    FILE* f = g_file;
++    g_file = nullptr;
++    if (f != nullptr) fclose(f);
++}
++
+ void recomp3ds::log_flush() {
+     if (g_writer != nullptr) {
+         g_writer_run = false;
 diff --git a/src/platform/recomp3ds.h b/src/platform/recomp3ds.h
-index 7c2b6bb..da29aa1 100644
+index 7c2b6bb..63e5aa1 100644
 --- a/src/platform/recomp3ds.h
 +++ b/src/platform/recomp3ds.h
-@@ -262,6 +262,19 @@ int run(const GameDesc& desc);
+@@ -262,6 +262,22 @@ int run(const GameDesc& desc);
  // Ask the runtime to shut the game down (from the HOME prompt or a script).
  void request_exit();
  
@@ -92,12 +122,27 @@ index 7c2b6bb..da29aa1 100644
 +void settings_menu_request_open(MenuPage page);
 +void settings_menu_request_close();
 +bool settings_menu_is_open();
++// 0104: true while a game wants SELECT for itself (the S2's GB Tower): SELECT
++// then goes only to the game, and a tap on the touch screen opens the menu.
++extern volatile bool g_select_to_game;
 +
  // sdmc:/3ds/<sd_dir>
  const char* base_path();
  
+diff --git a/src/platform/recomp3ds_internal.h b/src/platform/recomp3ds_internal.h
+index 8f32e0c..de856fd 100644
+--- a/src/platform/recomp3ds_internal.h
++++ b/src/platform/recomp3ds_internal.h
+@@ -161,6 +161,7 @@ namespace recomp3ds {
+     void log_start_writer();
+ 
+     void log_flush();
++    void log_close();   // 0109
+     // How long the log's card write under way has taken (0: none under way).
+     uint32_t log_write_stuck_ms();
+     // The log's lines so far onto the card itself (fsync), at the writer's
 diff --git a/src/platform/recomp3ds_run.cpp b/src/platform/recomp3ds_run.cpp
-index 97ea798..ef4fd56 100644
+index 97ea798..9a5042e 100644
 --- a/src/platform/recomp3ds_run.cpp
 +++ b/src/platform/recomp3ds_run.cpp
 @@ -1,3 +1,5 @@
@@ -114,7 +159,15 @@ index 97ea798..ef4fd56 100644
  #include "librecomp/game.hpp"
  #include "librecomp/rsp.hpp"
  #ifdef RECOMP_STATIC_MODS
-@@ -421,7 +424,15 @@ void set_rosalina_menu_shut(bool shut) {
+@@ -375,6 +378,7 @@ void set_rosalina_menu_shut(bool shut) {
+     if (g_no_home_menu) restart_into_home_menu();
+     gfxExit();
+     osSetSpeedupEnable(false);             // hand the system back at the clock it had
++    recomp3ds::log_close();                // 0109: no log write after the SD goes
+     __appExit();
+     if (__system_retAddr) __system_retAddr();
+     svcExitProcess();
+@@ -421,7 +425,15 @@ void set_rosalina_menu_shut(bool shut) {
  }
  
  void on_new_failed() { fatal("out of memory (operator new failed)"); }
@@ -131,7 +184,31 @@ index 97ea798..ef4fd56 100644
  void on_exit_called() { fatal("exit() was called (an error exit; the message before it in the log says why)"); }
  
  // Core 1's share for the application: APT takes up to 80%, PM (which
-@@ -883,6 +894,15 @@ void update_gfx_inner() {
+@@ -634,8 +646,21 @@ void update_gfx_inner() {
+         // capture for the host tools instead), and says so on the touch screen.
+         static u64 select_since = 0;
+         static bool fired = false;
+-        const u32 held = recomp3ds::input_raw_held() | recomp3ds::autotest_keys();   // settings_menu_update's scan
+-        if (update_rosalina_throttle(held)) {
++        const u32 raw_held = recomp3ds::input_raw_held() | recomp3ds::autotest_keys();   // settings_menu_update's scan
++        // 0104: in the GB Tower SELECT belongs to the game while the menu is shut
++        // (no menu, no screenshot); a tap on the touch screen, on its release so
++        // the menu does not take the same touch, opens the menu.
++        // shortcut: a Touch button set in the menu also opens it there; fine while both default to None.
++        const bool select_to_game = recomp3ds::g_select_to_game && !recomp3ds::settings_menu_is_open();
++        const u32 held = select_to_game ? raw_held & ~KEY_SELECT : raw_held;
++        {
++            static bool touch_was = false;
++            int touch_x = 0, touch_y = 0;
++            const bool touch_now = (raw_held & KEY_TOUCH) != 0 || recomp3ds::autotest_touch(&touch_x, &touch_y);
++            if (select_to_game && touch_was && !touch_now) recomp3ds::settings_menu_toggle();
++            touch_was = touch_now;
++        }
++        if (update_rosalina_throttle(raw_held)) {   // 0104: the real keys
+             // Rosalina's combo. Its SELECT neither opens the settings menu
+             // nor takes a screenshot, and no screenshot starts while the rest
+             // of the combo may be on its way.
+@@ -883,6 +908,15 @@ void update_gfx_inner() {
                  st.dl_per_sec, want_fps, st.late_frames, st.max_gap_ms, busy0, busy1, core2, core3, ucode_ms, ucode_tasks, recomp3ds::audio_frames_queued(),
                  (unsigned long)ac.submitted, (unsigned long)ac.rate, (unsigned long)ac.underruns, (unsigned long)ac.dropped, (unsigned long)(ac.low_water == 0xFFFFFFFFu ? 0u : ac.low_water),
                  (unsigned long)(mallinfo().arena / 1024), rheap, hle_stats, hle_ms.c_str(), preempt_stats, rom_stats, game_stats, thread_stats.c_str());
@@ -147,7 +224,7 @@ index 97ea798..ef4fd56 100644
          // On a line of its own: the log cuts lines at 512 characters.
          if (log_stats && dsp_stats[0] != '\0') fprintf(stderr, "%s\n", dsp_stats + 1);
          // dbg_profile 2 or 3: the game's hottest functions, every 10 s whatever the log level.
-@@ -1445,6 +1465,13 @@ int recomp3ds::run(const GameDesc& desc) {
+@@ -1445,6 +1479,13 @@ int recomp3ds::run(const GameDesc& desc) {
              Thread probe3 = threadCreate([](void*) {}, nullptr, 4096, 0x30, 3, false);
              fprintf(stderr, "recomp3ds: a thread on core 3: %s\n", probe3 != nullptr ? "created" : "refused");
              if (probe3 != nullptr) { threadJoin(probe3, UINT64_MAX); threadFree(probe3); g_core3 = true; g_watch_cores |= 0x8; }
@@ -162,10 +239,21 @@ index 97ea798..ef4fd56 100644
          // The renderer's own core-1 helper (the in-between builder) is a
          // New 3DS's extra: none when core 2 is left out.
 diff --git a/src/platform/settings_menu.cpp b/src/platform/settings_menu.cpp
-index d8da22d..782e280 100644
+index d8da22d..c00798f 100644
 --- a/src/platform/settings_menu.cpp
 +++ b/src/platform/settings_menu.cpp
-@@ -1066,6 +1066,12 @@ void recomp3ds::settings_menu_toggle() {
+@@ -344,7 +344,9 @@ void apply_perf_monitor(int v) {
+ }
+ 
+ void draw_hint() {
+-    const char* hint = g_open ? "SELECT: close   D-Pad: choose, change" : g_perf_monitor != 0 ? "SELECT: settings" : "";
++    const char* hint = g_open ? "SELECT: close   D-Pad: choose, change"
++                     : recomp3ds::g_select_to_game ? "Tap here: settings   SELECT: game"   // 0104
++                     : g_perf_monitor != 0 ? "SELECT: settings" : "";
+     recomp3ds::screen_printf("\x1b[%d;0H%-40s", kHintRow, hint);
+ }
+ 
+@@ -1066,6 +1068,13 @@ void recomp3ds::settings_menu_toggle() {
  
  void recomp3ds::settings_menu_redraw() { g_redraw = true; }
  
@@ -174,11 +262,12 @@ index d8da22d..782e280 100644
 +void recomp3ds::settings_menu_request_open(MenuPage page) { g_menu_request = page; }
 +void recomp3ds::settings_menu_request_close() { g_menu_request = -2; }
 +bool recomp3ds::settings_menu_is_open() { return g_open; }
++volatile bool recomp3ds::g_select_to_game = false;   // 0104
 +
  u32 recomp3ds::settings_menu_keys() {
      return g_open ? (KEY_DUP | KEY_DDOWN | KEY_DLEFT | KEY_DRIGHT) : 0;
  }
-@@ -1073,10 +1079,19 @@ u32 recomp3ds::settings_menu_keys() {
+@@ -1073,10 +1082,19 @@ u32 recomp3ds::settings_menu_keys() {
  // Called ~60 times a second from the main thread.
  void recomp3ds::settings_menu_update() {
      static u32 prev = 0;
@@ -246,10 +335,20 @@ index eb134f9..eed89e0 100644
      // in-between frames get eye targets of their own (two more 240x400
      // colour + depth buffers: 1125 KB of VRAM at RGBA8/D16, taken last and
 diff --git a/src/renderer/rt64_3ds_context.cpp b/src/renderer/rt64_3ds_context.cpp
-index 5914095..a056e51 100644
+index 5914095..3e5f997 100644
 --- a/src/renderer/rt64_3ds_context.cpp
 +++ b/src/renderer/rt64_3ds_context.cpp
-@@ -34,6 +34,16 @@ extern "C" void C3Di_UpdateContext(void);
+@@ -27,6 +27,9 @@
+ #include "rt64_3ds_stereo.h"
+ #include "rt64_3ds_shbin.h"
+ #include "ultramodern/extensions.h"
++// D66 v2 [Proton]: svcGetSystemTick of the last GB Tower task (s2-3ds main_3ds.cpp). Weak: a game without it (Banjo)
++// sees a null address and the VI blit keeps its old rule.
++extern "C" uint64_t s2_gb_task_tick_now() __attribute__((weak));   // 0106 [Proton]: s2-3ds main_3ds.cpp
+ 
+ extern "C" void C3Di_UpdateContext(void);
+ // citro3d's own frame split (internal, exported): closes the commands
+@@ -34,6 +37,16 @@ extern "C" void C3Di_UpdateContext(void);
  extern "C" bool C3Di_SplitFrame(u32** pBuf, u32* pSize);
  extern "C" void C3Di_RenderQueueWaitDone(void);   // citro3d (internal, exported): waits out every frame queued
  
@@ -266,7 +365,7 @@ index 5914095..a056e51 100644
  namespace {
  
  constexpr uint32_t kVboVerts = 65536;
-@@ -455,7 +465,62 @@ public:
+@@ -455,7 +468,82 @@ public:
      bool update_config(const ultramodern::renderer::GraphicsConfig&, const ultramodern::renderer::GraphicsConfig&) override { return true; }
      void enable_instant_present() override {}
      void send_dummy_workload(uint32_t fb_address) { (void)fb_address; }
@@ -275,18 +374,37 @@ index 5914095..a056e51 100644
 +    // framebuffer and the game swaps it with osViSwapBuffer) was never shown. Once no list has arrived for 3 VIs, put
 +    // rdram[VI_ORIGIN] straight into the top screen's framebuffer. Frames with lists never take this path.
 +    void update_screen() override {
-+        if (list_seq_ != vi_last_seq_) { vi_last_seq_ = list_seq_; vi_idle_ = 0; return; }
++        if (list_seq_ != vi_last_seq_) { vi_last_seq_ = list_seq_; vi_idle_ = 0; vi_list_tick_ = svcGetSystemTick(); return; }
++        // 0105 [Claude]: only in the GB Tower (its microcode ran after the last list). Elsewhere a stretch with no
++        // list is a load screen, and its framebuffer is junk (white streaks, a coloured strip, an orange line).
++        if (s2_gb_task_tick_now == nullptr || s2_gb_task_tick_now() <= vi_list_tick_) return;   // 0106
 +        if (!ok_ || g_quitting || g_paused || gpu_away()) return;
 +        if (++vi_idle_ < 3) return;
 +        present_vi_framebuffer();
 +    }
 +    uint32_t vi_last_seq_ = 0, vi_idle_ = 0, vi_blits_ = 0;
++    uint64_t vi_list_tick_ = 0;   // 0105: svcGetSystemTick when update_screen last saw a new list
++    uint32_t d66_origin_[2] = {}, d66_hash_[2] = {}, d66_held_ = 0; bool d66_good_ = false;   // D66 v2 [Proton]
 +    void present_vi_framebuffer() {
 +        const ultramodern::renderer::ViRegs* vi = ultramodern::renderer::get_vi_regs();
 +        const uint32_t type = vi->VI_STATUS_REG & 3u, origin = vi->VI_ORIGIN_REG & 0x00FFFFFFu, width = vi->VI_WIDTH_REG & 0xFFFu;
 +        if (type < 2 || width == 0 || width > 640 || origin == 0 || origin >= 0x00800000u) return;
 +        const int bpp_src = type == 3 ? 4 : 2;
 +        const int src_w = (int)width, step = src_w > 320 ? 2 : 1;          // 640 wide: every other pixel and line
++        // D66 v2 [Proton]: the GB Tower's menus (GB task stopped for over 200 ms) are written by the game's CPU into the
++        // alternating framebuffers over a few frames; on the console the blit caught one half redrawn (the Quit menu's
++        // selected 'Yes' missing). There, show an origin only once it reads the same as on its previous visit, else keep
++        // the last good image. While the GB game runs, every frame changes: blit as ever.
++        if (s2_gb_task_tick_now != nullptr && s2_gb_task_tick_now() != 0 && svcGetSystemTick() - s2_gb_task_tick_now() > SYSCLOCK_ARM11 / 5) {   // 0106
++            uint32_t h = 2166136261u;
++            const uint32_t bytes = (uint32_t)src_w * 240u * (uint32_t)bpp_src;
++            for (uint32_t i = 0; i < bytes; i += 4) h = (h ^ *(const uint32_t*)(rdram_ + ((origin + i) & 0x00FFFFFCu))) * 16777619u;
++            const int k = d66_origin_[0] == origin ? 0 : d66_origin_[1] == origin ? 1 : (d66_origin_[0] = d66_origin_[1], d66_hash_[0] = d66_hash_[1], 1);
++            if (d66_origin_[k] != origin || d66_hash_[k] != h) {
++                d66_origin_[k] = origin; d66_hash_[k] = h;
++                if (d66_good_) { if (d66_held_++ < 3) fprintf(stderr, "rt64-3ds: D66 VI blit held (origin %06lx still changing)\n", (unsigned long)origin); return; }
++            }
++        }
 +        const int out_w = src_w / step, out_h = 240;
 +        const int x0 = (400 - out_w) / 2;
 +        const GSPGPU_FramebufferFormat fmt = gfxGetScreenFormat(GFX_TOP);
@@ -323,6 +441,7 @@ index 5914095..a056e51 100644
 +        }
 +        gfxFlushBuffers();
 +        gfxScreenSwapBuffers(GFX_TOP, eyes == 2);
++        d66_good_ = true;   // D66 v2 [Proton]
 +        if (vi_blits_++ < 3)
 +            fprintf(stderr, "rt64-3ds: 0093 VI blit (no list for %lu VIs): origin %06lx width %lu type %lu fmt %d eyes %d\n",
 +                    (unsigned long)vi_idle_, (unsigned long)origin, (unsigned long)width, (unsigned long)type, (int)fmt, eyes);
@@ -330,7 +449,7 @@ index 5914095..a056e51 100644
      // Runs on the gfx thread when the runtime quits: let the GPU finish what
      // it was given and give citro3d's hooks and queues back before the
      // process closes (C3D_Fini waits for the render queue).
-@@ -474,6 +539,7 @@ public:
+@@ -474,6 +562,7 @@ public:
      float get_resolution_scale() const override { return 1.0f; }
  
      void send_dl(const OSTask* task) override {
@@ -338,7 +457,7 @@ index 5914095..a056e51 100644
          if (!ok_ || g_quitting) return;
          // Hold the game while the GPU is away (it would only run ahead unseen)
          // or a prompt has it paused.
-@@ -796,6 +862,10 @@ public:
+@@ -796,6 +885,10 @@ public:
              g_stats.late_frames = (int)late_;
              g_stats.max_gap_ms = max_gap_;
              late_ = 0;
@@ -349,7 +468,7 @@ index 5914095..a056e51 100644
              max_gap_ = 0;
              // Times per list drawn (the frame cap's passed-over lists apart).
              const uint32_t drawn = dl_count_ - passed_count_;
-@@ -1144,6 +1214,8 @@ public:
+@@ -1144,6 +1237,8 @@ public:
          return present ? ReadOutcome::Drawn : ReadOutcome::NotDrawn;
      }
      void tell_parsed(uint32_t data_ptr, ReadOutcome read) {
@@ -358,7 +477,7 @@ index 5914095..a056e51 100644
          ultramodern::extensions::on_displaylist_parsed(data_ptr);
          // RenderDesc::early_drawn: and drawn, so a game that waits for that
          // before its next frame does not wait for the screen below too. With
-@@ -1387,6 +1459,12 @@ private:
+@@ -1387,6 +1482,12 @@ private:
              flush_dcache(white_.data, 8 * 8 * 2);
              C3D_TexSetFilter(&white_, GPU_NEAREST, GPU_NEAREST);
          }
@@ -371,7 +490,7 @@ index 5914095..a056e51 100644
  
          // The snapshot texture: the 240x400 colour buffer copied whole into
          // a 256x512 RGBA8 texture (same tiling, rows padded), for the game's
-@@ -1466,6 +1544,7 @@ private:
+@@ -1466,6 +1567,7 @@ private:
              }
              interp_.set_gbi(desc.gbi);
              interp_.set_render_to_texture(desc.render_to_texture);
@@ -379,7 +498,7 @@ index 5914095..a056e51 100644
              interp_.set_sample_drawn_frame(desc.sample_drawn_frame);
              interp_.set_primary_world_instance(desc.primary_world_instance);
              interp_.set_unify_world_depth(desc.unify_world_depth);
-@@ -1663,8 +1742,12 @@ private:
+@@ -1663,8 +1765,13 @@ private:
          // rectangle becomes the eyes' clear value, and is not drawn.
          u32 clear_value = eye_clear_;
          const int fill_skip = (!offscreen_frame && fill_clear_) ? leading_fill(sfd, &clear_value) : -1;
@@ -390,19 +509,46 @@ index 5914095..a056e51 100644
          if (!offscreen_frame) {
 -            clear_target(cur_eye_[0], C3D_CLEAR_ALL, clear_value);
 +            clear_target(cur_eye_[0], eye_clear_bits, clear_value);
++            if (!(eye_clear_bits & C3D_CLEAR_COLOR)) clear_margins(cur_eye_[0]);   // M1 [Proton]
              draw_on(cur_eye_[0]);
          }
          cur_target_ = offscreen_frame ? -2 : -1;
-@@ -1726,7 +1809,7 @@ private:
+@@ -1726,7 +1833,8 @@ private:
          if (pass == 1) {
              // The right eye: same records, same state, the other shift.
              tl_split = svcGetSystemTick();
 -            clear_target(cur_eye_[1], C3D_CLEAR_ALL, clear_value);
 +            clear_target(cur_eye_[1], eye_clear_bits, clear_value);
++            if (!(eye_clear_bits & C3D_CLEAR_COLOR)) clear_margins(cur_eye_[1]);   // M1 [Proton]
              draw_on(cur_eye_[1]);
              cur_target_ = -1;
              frame_viewport_ = false;
-@@ -2960,7 +3043,19 @@ private:
+@@ -2918,6 +3026,7 @@ private:
+     // beats a random number: a stipple of the alpha's density (Goemon's lists
+     // set it) that the alpha test alone (alpha > 0) drew solid; blending by
+     // alpha is its average, at a blend's cost.
++    uint32_t depth_only_log_ = 0;   // 0107
+     static bool draw_blends(const rt64_3ds::DrawRecord& d) {
+         const uint32_t l = d.othermode_l, cyc = (d.othermode_h >> 20) & 3;
+         if ((l & 3) == 3) return true;
+@@ -2926,6 +3035,16 @@ private:
+         const uint32_t b2 = (cyc == 1) ? ((l >> 16) & 3) : ((l >> 18) & 3);
+         return force_bl && m2 == 1 && (b2 == 0 || b2 == 1);
+     }
++    // 0107 [Claude]: force blend with P*0 + MEM*1 leaves the framebuffer's colour: a depth-only draw (the
++    // S2's rock moves mask the ground with it). Drawn with the colour write off.
++    static bool draw_depth_only(const rt64_3ds::DrawRecord& d) {
++        const uint32_t l = d.othermode_l, cyc = (d.othermode_h >> 20) & 3;
++        if ((l & 0x4000) == 0 || (l & 3) == 3 || (l & 0x40) == 0) return false;   // 0107b: no IMAGE_READ, MEM reads 0
++        const uint32_t a2 = (cyc == 1) ? ((l >> 24) & 3) : ((l >> 26) & 3);
++        const uint32_t m2 = (cyc == 1) ? ((l >> 20) & 3) : ((l >> 22) & 3);
++        const uint32_t b2 = (cyc == 1) ? ((l >> 16) & 3) : ((l >> 18) & 3);
++        return a2 == 3 && m2 == 1 && b2 == 2;
++    }
+ 
+     // fallbacks: counts the draws whose combiner is inexact (null: don't).
+     void apply_state(const rt64_3ds::DrawRecord& d, size_t index, int* fallbacks) {
+@@ -2960,7 +3079,19 @@ private:
              else if (d.tex[t].valid && d.tex[t].rtt >= 0) {
                  // An off-screen image drawn on the GPU (this frame or earlier).
                  RttTarget& rt = rtt_[d.tex[t].rtt];
@@ -423,7 +569,7 @@ index 5914095..a056e51 100644
                      if (&rt.tex != last_tex_[t]) {
                          C3D_TexBind(t, &rt.tex);
                          last_tex_[t] = &rt.tex; last_tex_param_[t] = 0xFFFFFFFEu;
-@@ -2990,9 +3085,14 @@ private:
+@@ -2990,9 +3121,14 @@ private:
                      bound = true;
                  }
              }
@@ -441,7 +587,18 @@ index 5914095..a056e51 100644
              }
          }
          if (us != last_us_ || vs != last_vs_) {
-@@ -3137,6 +3237,10 @@ private:
+@@ -3086,6 +3222,10 @@ private:
+         // what copy-mode alpha compares test (the eye's alpha is whatever
+         // the combiner put out).
+         if (frame_viewport_) wmask = (GPU_WRITEMASK)(wmask & ~GPU_WRITE_ALPHA);
++        if (draw_depth_only(d)) {   // 0107
++            wmask = (GPU_WRITEMASK)(wmask & GPU_WRITE_DEPTH);
++            if (++depth_only_log_ <= 3) fprintf(stderr, "rt64-3ds: 0107 depth-only draw (oml %08lx)\n", (unsigned long)l);
++        }
+         // Strictly nearer, as RT64 has it (LESS; nearer is larger here): a
+         // surface drawn again exactly over itself loses. DK64's Galleon gold
+         // stacks draw each top twice, textured and then untextured on the
+@@ -3137,6 +3277,10 @@ private:
          // The original game's own full-width scissor is stretched to the wide
          // screen: the patched projection already fills it.
          if (d.scissor[0] <= 0 && d.scissor[2] >= geo_.w) { x0 = 0; x1 = 400; }
@@ -452,7 +609,15 @@ index 5914095..a056e51 100644
          if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > 400) x1 = 400; if (y1 > 240) y1 = 240;
          // Mtx_OrthoTilt maps screen y = 0 to framebuffer x = 240 and the
          // screen's left edge to framebuffer y = 400: both axes run backwards.
-@@ -3852,6 +3956,43 @@ public:
+@@ -3459,6 +3603,7 @@ public:
+ 
+     // cm is the tile's cms/cmt: bit 0 G_TX_MIRROR, bit 1 G_TX_CLAMP.
+     static GPU_TEXTURE_WRAP_PARAM wrap_mode(uint8_t cm, uint8_t mask, uint16_t size) {
++        if (mask != 0 && (cm & 4) && (1u << mask) == size) return GPU_MIRRORED_REPEAT;   // 0113
+         if (mask == 0 || (cm & 2)) return GPU_CLAMP_TO_EDGE;
+         if ((1u << mask) != size) return GPU_CLAMP_TO_EDGE;
+         return (cm & 1) ? GPU_MIRRORED_REPEAT : GPU_REPEAT;
+@@ -3852,6 +3997,45 @@ public:
                  if (frame_.draws[i].screen == 0 && rt64_3ds::stretch_tint_quad(frame_.draws[i], frame_.verts.data(), geo_)) tint_[i] = 1;
              }
          }
@@ -465,6 +630,8 @@ index 5914095..a056e51 100644
 +                if (!rt64_3ds::edge_bar(d, vs, geo_)) continue;
 +                if (rt64_3ds::seam_bar(d, vs, geo_))   // D64: count them (only the wipe should)
 +                    fprintf(stderr, "rt64-3ds: D64 seam bar dropped, draw %u at x %.1f\n", (unsigned)i, vs[d.first].x / vs[d.first].w);
++                else if (rt64_3ds::seam_hbar(d, vs, geo_))   // D65 [Nexus]: the split's horizontal bar
++                    fprintf(stderr, "rt64-3ds: D65 seam hbar dropped, draw %u at y %.1f\n", (unsigned)i, vs[d.first].y / vs[d.first].w);
 +                for (uint32_t k = d.first + 1; k < d.first + d.count; k++) vs[k] = vs[d.first];
 +            }
 +        }
@@ -496,7 +663,7 @@ index 5914095..a056e51 100644
          if (!sf.on) return;
          const rt64_3ds::Vtx3ds* verts = frame_.verts.data();
          // RenderDesc::infinity_rect_cover_zoom. The vertices are recorded
-@@ -4005,6 +4146,8 @@ public:
+@@ -4005,6 +4189,8 @@ public:
              read_geo_ = rt64_3ds::ScreenGeometry::make(fs.w, fs.h, desc.display_aspect);
              interp_.set_screen(read_geo_);
              fprintf(stderr, "rt64-3ds: VI width %u: lists read at %dx%d from here\n", width, read_geo_.w, read_geo_.h);
@@ -505,14 +672,21 @@ index 5914095..a056e51 100644
              return;
          }
          if (width != vi_width_logged_) {
-@@ -4077,10 +4220,14 @@ public:
+@@ -4077,36 +4263,84 @@ public:
          uint16_t w = 0, h = 0;
          C3D_Mtx proj{};
          uint32_t clear_frame = ~0u;
 +        uint32_t fail_frame = ~0u;     // D45: the frame its creation failed in (no retry per draw)
 +        uint32_t used_frame = 0;       // D50: the last frame that drew into it or sampled it
++        uint32_t addr = ~0u;           // 0110: the image it holds
      };
      RttTarget rtt_[rt64_3ds::kMaxRtt];
++    static constexpr u32 kRttDepthBytes = 512u * 512u * 2u;   // 0108: the shared depth (D16)
++    void* rtt_depth_ = nullptr;
++    int rtt_depth_owner_ = -1;                   // 0108: the target whose depth it holds
++    uint32_t rtt_depth_reclears_ = 0;
++    uint32_t rtt_swaps_ = 0;                     // 0110
++    uint32_t rtt_depth_splits_ = 0;              // 0108b
      uint32_t rtt_room_frame_ = ~0u - 8;          // the texture cache last gave VRAM back for a target
      uint32_t rtt_no_vram_ = 0;                   // targets refused for VRAM, for the log's first lines
 +    uint32_t rtt_failed_ = 0, rtt_sampled_missing_ = 0, rtt_freed_ = 0;   // D50: this second's
@@ -520,7 +694,20 @@ index 5914095..a056e51 100644
      int cur_target_ = -1;                        // the RTT slot drawn into, -1 = the eye
      RttTarget* ensure_rtt(int i) {
          const rt64_3ds::RttImage& img = frame_.rtts[i];
-@@ -4090,23 +4237,39 @@ public:
+         RttTarget& t = rtt_[i];
++        // 0110 [Claude]: the image's target may sit in another slot (a slot number is the frame's, not the image's).
++        if (t.addr != img.addr) {
++            for (int j = 0; j < rt64_3ds::kMaxRtt; j++) {
++                RttTarget& o = rtt_[j];
++                if (j == i || o.rt == nullptr || o.addr != img.addr || o.w != img.pot_w || o.h != img.pot_h) continue;
++                std::swap(t, o);
++                rtt_depth_owner_ = -1;
++                if (++rtt_swaps_ <= 8) fprintf(stderr, "rt64-3ds: 0110 render texture of image %06x moved from slot %d to %d (frame %u)\n", (unsigned)(img.addr & 0xFFFFFF), j, i, frames_);
++                break;
++            }
++        }
+         if (t.rt == nullptr || t.w != img.pot_w || t.h != img.pot_h) {
+             // Deleting a render target inside a frame is a citro3d PANIC (and
              // the GPU may still read it): retire it until the next frame start.
              if (t.rt != nullptr) { retired_rtt_.push_back({ t.rt, t.tex }); t.rt = nullptr; }
              if (img.pot_w == 0 || img.pot_h == 0) return nullptr;
@@ -545,7 +732,17 @@ index 5914095..a056e51 100644
 +                // and those that failed left the labels out). RGBA8 only if 16
 +                // bits fail to allocate (they would not fit either).
 +                if (!C3D_TexInitVRAM(&t.tex, img.pot_w, img.pot_h, half ? GPU_RGBA8 : GPU_RGBA5551)) continue;
-+                t.rt = C3D_RenderTargetCreateFromTex(&t.tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH16);
++                // 0108 [Claude]: one D16 depth for every render texture (the targets stay alive; depth is only
++                // needed while one is drawn). Allocated at the first target; a larger target keeps its own.
++                if (rtt_depth_ == nullptr) {
++                    rtt_depth_ = vramAlloc(kRttDepthBytes);
++                    fprintf(stderr, "rt64-3ds: 0108 shared render texture depth %s (%u KB)\n", rtt_depth_ ? "ok" : "failed", (unsigned)(kRttDepthBytes / 1024));
++                }
++                if (rtt_depth_ != nullptr && (u32)img.pot_w * img.pot_h * 2u <= kRttDepthBytes) {
++                    t.rt = C3D_RenderTargetCreateFromTex(&t.tex, GPU_TEXFACE_2D, 0, C3D_DEPTHTYPE(-1));
++                    if (t.rt != nullptr) C3D_FrameBufDepth(&t.rt->frameBuf, rtt_depth_, GPU_RB_DEPTH16);
++                }
++                else t.rt = C3D_RenderTargetCreateFromTex(&t.tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH16);
 +                if (t.rt == nullptr) { C3D_TexDelete(&t.tex); continue; }
 +                made = true;
 +                if (half) fprintf(stderr, "rt64-3ds: render texture %d at RGBA8 + D16\n", i);
@@ -569,15 +766,23 @@ index 5914095..a056e51 100644
              t.w = img.pot_w; t.h = img.pot_h;
              C3D_TexSetFilter(&t.tex, GPU_LINEAR, GPU_LINEAR);
              C3D_TexSetWrap(&t.tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
-@@ -4125,6 +4288,7 @@ public:
+@@ -4122,9 +4356,15 @@ public:
+             if (logged < 60) { logged++; fprintf(stderr, "rt64-3ds: frame %u draws into render texture %d\n", frames_, i); }
+             // First draw into it this frame: a fresh depth buffer (the
+             // colour is the game's own fill).
++            // 0108b: a clear goes ahead of the commands since the last split; the shared depth may hold another
++            // target's pending draws: send those first.
++            if (rtt_depth_ != nullptr && t.rt->frameBuf.depthBuf == rtt_depth_ && rtt_depth_owner_ != i) { frame_split(); rtt_depth_splits_++; }
              clear_target(t.rt, C3D_CLEAR_ALL, 0x000000FF);
              t.clear_frame = frames_;
++            rtt_depth_owner_ = i;   // 0108
          }
 +        t.used_frame = frames_;
++        t.addr = img.addr;   // 0110
          return &t;
      }
      struct RetiredRtt { C3D_RenderTarget* rt; C3D_Tex tex; };
-@@ -4132,6 +4296,34 @@ public:
+@@ -4132,6 +4372,34 @@ public:
      // Out of the frame, just before C3D_FrameBegin (which would wait for the
      // GPU anyway): render targets ensure_rtt replaced.
      void retire_rtt_targets() {
@@ -612,7 +817,41 @@ index 5914095..a056e51 100644
          for (RetiredRtt& r : retired_rtt_) { C3D_RenderTargetDelete(r.rt); C3D_TexDelete(&r.tex); }
          retired_rtt_.clear();
      }
-@@ -4880,6 +5072,7 @@ public:
+@@ -4153,6 +4421,13 @@ public:
+         if (tgt >= 0) {
+             RttTarget* t = ensure_rtt(tgt);
+             if (t == nullptr) return false;
++            // 0108: the shared depth holds another target's: start this one's afresh.
++            if (rtt_depth_ != nullptr && t->rt->frameBuf.depthBuf == rtt_depth_ && rtt_depth_owner_ != tgt) {
++                frame_split(); rtt_depth_splits_++;   // 0108b
++                clear_target(t->rt, C3D_CLEAR_DEPTH, 0);
++                rtt_depth_owner_ = tgt;
++                if (++rtt_depth_reclears_ <= 3) fprintf(stderr, "rt64-3ds: 0108 depth cleared again for render texture %d (frame %u)\n", tgt, frames_);
++            }
+             draw_on(t->rt);
+             C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, u_xform_, &t->proj);
+         }
+@@ -4323,6 +4598,19 @@ public:
+         u32 words = 0;
+         if (C3Di_SplitFrame(&list, &words)) push_op(DeferredOp{ list, words, nullptr, C3D_CLEAR_ALL, 0 });
+     }
++    // M1 [Proton]: RenderDesc::keep_unfilled keeps an eye's colour from frame to frame; the margins beside a frame the game
++    // draws only inside (Pokemon Stadium 2's Mini-Game menu, 320 wide on the 400-wide screen) were never drawn and showed
++    // what the VRAM held (junk on the console). Black them, the screen columns left and right of the frame, before the
++    // frame's draws (a game drawing there still draws over them). A screen column is 240 pixels, contiguous; whole tiles only.
++    void clear_margins(C3D_RenderTarget* t) {
++        const int m = (int)(geo_.x0 * geo_.scale_x + 0.5f);
++        if (t == nullptr || m <= 0 || m > 192 || (m & 7) != 0) return;
++        const u32 col = 240u * (color16_ ? 2u : 4u), bytes = (u32)m * col;
++        u8* const c = (u8*)t->frameBuf.colorBuf;
++        GxOp fill{ GxOp::Fill, nullptr, c, 0, 0, bytes, 0 };
++        fill.dst2 = c + (u32)(400 - m) * col; fill.size2 = bytes;
++        queue_gx(fill);
++    }
+     void clear_target(C3D_RenderTarget* t, C3D_ClearBits bits, u32 color) {
+         if (!deferring_) { C3D_RenderTargetClear(t, bits, color, 0); return; }
+         // As citro3d queues a clear in a frame: at once, ahead of the
+@@ -4880,6 +5168,7 @@ public:
      uint8_t* capture_copy_ = nullptr;
      OSTask capture_task_{};
      C3D_Tex white_{};
@@ -621,10 +860,19 @@ index 5914095..a056e51 100644
      int last_snap_slot_ = 0;                // the slot copy_snapshot_to last filled (verify_snapshot)
      uint32_t snapshots_ = 0;
 diff --git a/src/renderer/rt64_3ds_dl.cpp b/src/renderer/rt64_3ds_dl.cpp
-index 273233e..5e5498c 100644
+index 273233e..d77eaa8 100644
 --- a/src/renderer/rt64_3ds_dl.cpp
 +++ b/src/renderer/rt64_3ds_dl.cpp
-@@ -1299,9 +1299,20 @@ struct Interpreter::Impl {
+@@ -1262,7 +1262,7 @@ struct Interpreter::Impl {
+     // The VI origin register's values (note_vi_origin): a framebuffer plus
+     // the mode's field offset (a line or two), so a colour image that short
+     // distance below one is that framebuffer.
+-    uint32_t vi_origins[4] = {};
++    uint32_t vi_origins[16] = {};   // f45v6 [Nexus]: was 4; the console notes 6+ origins and evicted live framebuffers
+     int vi_origin_next = 0;
+     static constexpr uint32_t kOriginSlack = 0x1000;
+     bool is_vi_origin_fb(uint32_t a) const {
+@@ -1299,10 +1299,42 @@ struct Interpreter::Impl {
      // is neither a presented framebuffer nor the depth buffer is drawn into
      // a GPU texture of its own, which later loads from that image sample.
      bool rtt_enabled = false;
@@ -643,9 +891,31 @@ index 273233e..5e5498c 100644
 +        return v;
 +    }
      int cur_rtt = -1;                   // the image the current colour image draws into, or -1
++    // 0112 [Claude]: the rows of each image drawn so far (the draws' scissor bottom), for the image at rtt_rows_addr.
++    uint16_t rtt_rows[kMaxRtt] = {};
++    uint32_t rtt_rows_addr[kMaxRtt] = {};
++    uint32_t rtt_rows_skipped = 0;
++    // 0111 [Claude]: a rectangle drawn into image n down to row `rows` overwrites the memory of any other image that
++    // starts inside it: that image is gone (Pokemon Stadium 2's end-of-battle portraits over the VS ones).
++    uint32_t rtt_evicted = 0;
++    void rtt_evict_overlapped(int n, float lry) {
++        const RttImage& m = rtt_images[n];
++        if (m.addr == 0 || m.width == 0 || lry <= 0.0f) return;
++        const float bottom = std::fmin(lry, (float)scissor[3]);
++        if (bottom <= 0.0f) return;
++        const uint32_t end = m.addr + (uint32_t)m.width * 2u * (uint32_t)bottom;
++        for (int j = 0; j < rtt_count; j++) {
++            RttImage& o = rtt_images[j];
++            if (j == n || o.addr == 0 || o.addr <= m.addr || o.addr >= end) continue;
++            if (++rtt_evicted <= 8) fprintf(stderr, "rt64-3ds: 0111 image %06x overwritten by image %06x (rows 0-%d): dropped\n", (unsigned)(o.addr & 0xFFFFFF), (unsigned)(m.addr & 0xFFFFFF), (int)bottom);
++            o.addr = 0; o.width = 0;
++            rtt_used[j] = 0;   // the first victim
++        }
++    }
      uint32_t list_seq = 0;              // display lists run so far
  
-@@ -1414,20 +1425,22 @@ struct Interpreter::Impl {
+     // RenderDesc::sample_drawn_frame: the game copies parts of the frame it
+@@ -1414,20 +1446,22 @@ struct Interpreter::Impl {
          // A framebuffer the VI presents is on screen wherever it lives
          // (Dinosaur Planet keeps its 640x480 front-end buffers in patch RAM).
          if (is_presented_fb(a)) return -1;
@@ -670,7 +940,7 @@ index 273233e..5e5498c 100644
              return i;
          }
          // Known once two framebuffers have been presented (a double-buffered
-@@ -1440,14 +1453,16 @@ struct Interpreter::Impl {
+@@ -1440,14 +1474,16 @@ struct Interpreter::Impl {
                      rtt_images[i].width = (uint16_t)width;
                      rtt_images[i].pot_w = pot16(width);
                  }
@@ -688,7 +958,7 @@ index 273233e..5e5498c 100644
          return i;
      }
      static uint16_t pot16(uint32_t v) { uint32_t p = 8; while (p < v && p < 1024) p <<= 1; return (uint16_t)p; }
-@@ -1906,16 +1921,27 @@ struct Interpreter::Impl {
+@@ -1906,16 +1942,34 @@ struct Interpreter::Impl {
          // With sample_drawn_frame a block load of whole rows of an image
          // reads it too (the rims load their strips with LOADBLOCK), but only
          // an image drawn by this list: the memory is the game's to reuse.
@@ -711,6 +981,13 @@ index 273233e..5e5498c 100644
 -                if (d.addr >= img.addr && d.addr < img.addr + (uint32_t)img.width * 2 * img.pot_h && row == (uint32_t)img.width * 2) {
 -                    d.rtt = (int8_t)i;
 -                    break;
++                // 0112: only the rows drawn into it (an image never drawn this far is RDRAM there).
++                const uint32_t drawn_rows = (rtt_rows_addr[i] == img.addr && rtt_rows[i] != 0) ? rtt_rows[i] : img.pot_h;
++                if (d.addr >= img.addr && d.addr < img.addr + (uint32_t)img.width * 2 * img.pot_h && row == (uint32_t)img.width * 2 &&
++                    d.addr >= img.addr + (uint32_t)img.width * 2 * drawn_rows) {
++                    if (++rtt_rows_skipped <= 4) fprintf(stderr, "rt64-3ds: 0112 load %06x past image %06x's %u drawn rows: RDRAM\n", (unsigned)(d.addr & 0xFFFFFF), (unsigned)(img.addr & 0xFFFFFF), (unsigned)drawn_rows);
++                    continue;
++                }
 +                if (d.addr >= img.addr && d.addr < img.addr + (uint32_t)img.width * 2 * img.pot_h && row == (uint32_t)img.width * 2 &&
 +                    (d.rtt < 0 || img.addr > rtt_images[d.rtt].addr)) {
 +                    d.rtt = (int8_t)i;   // D36: the nearest image below the load (images 0x880 apart overlap in 512 rows)
@@ -720,7 +997,50 @@ index 273233e..5e5498c 100644
          }
          d.tlut_mode = (othermode_h >> 14) & 3;
          // With the TLUT on, the RDP looks every 4- and 8-bit texel up in the
-@@ -4047,6 +4073,7 @@ void Interpreter::set_gbi(Gbi gbi) {
+@@ -1926,6 +1980,10 @@ struct Interpreter::Impl {
+         d.width = (uint16_t)w;
+         d.height = (uint16_t)h;
+         d.masks = tl.masks; d.maskt = tl.maskt; d.cms = tl.cms; d.cmt = tl.cmt;
++        // 0113 [Claude]: mirror + clamp on a tile wider than the mask: the clamp is at the tile's edge, past the
++        // mirrored half (Delibird's face: one eye in a 64-wide texture, the tile 128 wide). Bit 4: mirrored repeat.
++        if (tl.cms == 3 && tl.masks != 0 && tw > (1 << tl.masks)) d.cms |= 4;
++        if (tl.cmt == 3 && tl.maskt != 0 && th > (1 << tl.maskt)) d.cmt |= 4;
+         d.palette = tl.palette;
+         d.nibble = (tl.siz == 0) ? best->nibble : 0;
+         d.block = best->block;
+@@ -2004,6 +2062,12 @@ struct Interpreter::Impl {
+         r.screen = bottom_span ? 1 : 0;
+         r.proj_id = proj_id;
+         r.rtt = (int8_t)cur_rtt;
++        if (cur_rtt >= 0) {   // 0112
++            const RttImage& ri = rtt_images[cur_rtt];
++            if (rtt_rows_addr[cur_rtt] != ri.addr) { rtt_rows_addr[cur_rtt] = ri.addr; rtt_rows[cur_rtt] = 0; }
++            const int rows = std::min<int>(std::max<int>(scissor[3], 0), ri.pot_h);
++            if (rows > rtt_rows[cur_rtt]) rtt_rows[cur_rtt] = (uint16_t)rows;
++        }
+         r.perspective = is_perspective(proj);
+         r.depth_a = cur_depth_a; r.depth_b = cur_depth_b;
+         if (r.kind == DrawRecord::Tris) { r.vp_za = vp_za; r.vp_zb = vp_zb; }   // rectangles: no viewport
+@@ -2439,6 +2503,7 @@ struct Interpreter::Impl {
+         if (frame_copy) note_draw(r);
+         // Fill and copy modes cover the lower-right pixel too.
+         if (cyc == 2 || cyc == 3) { lrx += 1.0f; lry += 1.0f; }
++        if (cur_rtt >= 0) rtt_evict_overlapped(cur_rtt, lry);   // 0111
+         float w = lrx - ulx, h = lry - uly;
+         // RenderDesc::aim_texture_hashes: a candidate reticle's texels are
+         // hashed here, while RDRAM still holds them (nothing reads RDRAM
+@@ -3615,8 +3680,8 @@ void Interpreter::note_vi_origin(uint32_t origin) {
+     const uint32_t addr = origin & kRdramMask;
+     if (addr == 0) return;
+     for (uint32_t o : impl_->vi_origins) if (o == addr) return;
+-    impl_->vi_origins[impl_->vi_origin_next++ & 3] = addr;
+-    if (impl_->vi_origin_next <= 6) fprintf(stderr, "rt64-3ds: VI origin %08x noted (a presented framebuffer ends a line or two below it)\n", addr);
++    impl_->vi_origins[impl_->vi_origin_next++ & 15] = addr;
++    if (impl_->vi_origin_next <= 24) fprintf(stderr, "rt64-3ds: VI origin %08x noted #%d (a presented framebuffer ends a line or two below it)\n", addr, impl_->vi_origin_next);
+ }
+ 
+ bool Interpreter::run(uint32_t data_ptr, FrameRecord& out) {
+@@ -4047,6 +4112,7 @@ void Interpreter::set_gbi(Gbi gbi) {
      impl_->op_table = gbi == Gbi::F3DEX ? kF3dexOp.v : kF3dex2Op.v;
  }
  void Interpreter::set_render_to_texture(bool on) { impl_->rtt_enabled = on; }
@@ -761,10 +1081,10 @@ index 38de275..97d2bcf 100644
  // of its own (Dinosaur Planet's effects keep two and the pause a third).
  constexpr int kMaxSnapshots = 4;
 diff --git a/src/renderer/rt64_3ds_stereo.cpp b/src/renderer/rt64_3ds_stereo.cpp
-index 047acf9..7095b1e 100644
+index 047acf9..1c87d04 100644
 --- a/src/renderer/rt64_3ds_stereo.cpp
 +++ b/src/renderer/rt64_3ds_stereo.cpp
-@@ -276,6 +276,41 @@ bool stretch_tint_quad(const DrawRecord& d, Vtx3ds* verts, const ScreenGeometry&
+@@ -276,6 +276,58 @@ bool stretch_tint_quad(const DrawRecord& d, Vtx3ds* verts, const ScreenGeometry&
      return true;
  }
  
@@ -779,7 +1099,7 @@ index 047acf9..7095b1e 100644
 +        x0 = std::min(x0, x); x1 = std::max(x1, x); y0 = std::min(y0, y); y1 = std::max(y1, y);
 +    }
 +    const float w = (float)geo.w, h = (float)geo.h;
-+    if (x1 - x0 > kEdgeBarWidth || y1 - y0 < 0.9f * h) return false;
++    if (x1 - x0 > kEdgeBarWidth || y1 - y0 < 0.9f * h) return seam_hbar(d, verts, geo);   // D65 [Nexus]
 +    const bool left = x0 >= -kEdgeBarWidth && x1 <= kEdgeBarWidth;
 +    const bool right = x0 >= w - kEdgeBarWidth && x1 <= w + kEdgeBarWidth;
 +    if (left || right) return true;
@@ -803,14 +1123,31 @@ index 047acf9..7095b1e 100644
 +    return x0 >= kEdgeBarWidth && x1 <= w - kEdgeBarWidth;
 +}
 +
++bool seam_hbar(const DrawRecord& d, const Vtx3ds* verts, const ScreenGeometry& geo) {
++    // D65 [Nexus]: exactly the split's bar: two triangles, untextured, black vertices,
++    // 1.5 to 2.5 pixels tall, the frame's whole width, inside the frame.
++    if (d.kind != DrawRecord::Tris || d.count != 6 || d.rtt >= 0 || d.screen != 0) return false;
++    if (d.tex[0].valid || d.tex[1].valid) return false;
++    float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
++    for (uint32_t i = d.first; i < d.first + d.count; i++) {
++        const Vtx3ds& v = verts[i];
++        if (!(v.w > 0.0f) || v.r > 8 || v.g > 8 || v.b > 8) return false;
++        const float x = v.x / v.w, y = v.y / v.w;
++        x0 = std::min(x0, x); x1 = std::max(x1, x); y0 = std::min(y0, y); y1 = std::max(y1, y);
++    }
++    const float w = (float)geo.w, h = (float)geo.h;
++    if (y1 - y0 < 1.5f || y1 - y0 > 2.5f || x0 > 0.5f || x1 < w - 0.5f) return false;
++    return y0 >= kEdgeBarWidth && y1 <= h - kEdgeBarWidth;
++}
++
  bool rect_covers_frame(const DrawRecord& d, const Vtx3ds* verts, int frame_w, int frame_h) {
      float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
      for (uint32_t i = d.first; i < d.first + d.count; i++) {
 diff --git a/src/renderer/rt64_3ds_stereo.h b/src/renderer/rt64_3ds_stereo.h
-index 2108fc9..26fbb1b 100644
+index 2108fc9..04cb100 100644
 --- a/src/renderer/rt64_3ds_stereo.h
 +++ b/src/renderer/rt64_3ds_stereo.h
-@@ -108,6 +108,18 @@ bool rect_covers_frame(const DrawRecord& d, const Vtx3ds* verts, int frame_w, in
+@@ -108,6 +108,22 @@ bool rect_covers_frame(const DrawRecord& d, const Vtx3ds* verts, int frame_w, in
  constexpr float kTintQuadMargin = 12.0f;
  bool stretch_tint_quad(const DrawRecord& d, Vtx3ds* verts, const ScreenGeometry& geo);
  
@@ -825,6 +1162,10 @@ index 2108fc9..26fbb1b 100644
 +// exact bar (two triangles, black vertices, 1.5-2.5 px wide, the frame's
 +// whole height) anywhere inside the frame.
 +bool seam_bar(const DrawRecord& d, const Vtx3ds* verts, const ScreenGeometry& geo);
++// D65 (nexus): the same bar lying down at the seam of the battle's top/bottom split:
++// two triangles, untextured, black vertices, 1.5-2.5 px tall, the frame's whole width,
++// away from its top and bottom. edge_bar takes it too.
++bool seam_hbar(const DrawRecord& d, const Vtx3ds* verts, const ScreenGeometry& geo);
 +
  // Positive view distance of a depth sample z' (= (ndc z + 1) / 2) under the
  // world projection's m[2][2] and m[3][2]; <= 0 when invalid.

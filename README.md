@@ -62,12 +62,12 @@ Para conferir no Windows (PowerShell): `Get-FileHash stadium2.z64 -Algorithm SHA
 
 Escolha **um** dos dois formatos do release:
 
-### Opção A: `.cia` (aparece no menu HOME, recomendado)
+### Opção A: `.cia` (aparece no menu HOME)
 1. Baixe `PokemonStadium2-3DS.cia` na [página de releases](../../releases/latest).
 2. Copie para qualquer pasta do cartão SD (ex.: `sdmc:/cias/`).
 3. No 3DS, abra o **FBI**, vá em *SD → cias*, selecione o arquivo e escolha **Install CIA**.
 
-### Opção B: `.3dsx` (Homebrew Launcher)
+### Opção B: `.3dsx` (Homebrew Launcher, recomendado)
 1. Baixe `PokemonStadium2-3DS.3dsx`.
 2. Copie para `sdmc:/3ds/`.
 3. Abra pelo **Homebrew Launcher**.
