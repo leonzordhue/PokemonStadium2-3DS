@@ -1,7 +1,16 @@
 diff --git a/cia/template.rsf b/cia/template.rsf
-index a09a0be..48bc744 100644
+index a09a0be..c212b3e 100644
 --- a/cia/template.rsf
 +++ b/cia/template.rsf
+@@ -19,7 +19,7 @@
+ BasicInfo:
+   Title                   : "@TITLE@"
+   ProductCode             : "@PRODUCT@"
+-  Logo                    : Homebrew
++  Logo                    : Nintendo
+ 
+ TitleInfo:
+   Category                : Application
 @@ -30,7 +30,7 @@ Option:
    FreeProductCode         : true # Removes limitations on ProductCode
    MediaFootPadding        : false # If true CCI files are created with padding

@@ -116,8 +116,8 @@ if(S2_NULL_RENDERER)
     target_compile_definitions(PokemonStadium2Recompiled3DS PRIVATE S2_NULL_RENDERER)
 endif()
 
-set(S2_TITLE "Pokemon Stadium 2")
-set(S2_DESCRIPTION "Pokemon Stadium 2 Recompiled - New 3DS")
+set(S2_TITLE "Pokémon Stadium 2")
+set(S2_DESCRIPTION "Pokémon Stadium 2 - New 3DS")
 # icon.png: original 48x48 art (nexus D30).
 add_3dsx(PokemonStadium2Recompiled3DS TITLE "${S2_TITLE}" DESCRIPTION "${S2_DESCRIPTION}"
          ICON "${CMAKE_CURRENT_LIST_DIR}/icon.png")
