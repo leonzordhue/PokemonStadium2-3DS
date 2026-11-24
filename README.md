@@ -67,6 +67,10 @@ Escolha **um** dos dois formatos do release:
 2. Copie para qualquer pasta do cartão SD (ex.: `sdmc:/cias/`).
 3. No 3DS, abra o **FBI**, vá em *SD → cias*, selecione o arquivo e escolha **Install CIA**.
 
+**Ou instale direto pelo QR code, sem copiar nada:** no FBI, abra *Remote Install → Scan QR Code* e aponte a câmera para o código abaixo (o 3DS precisa estar no Wi-Fi). Ele baixa e instala o `.cia` da versão mais recente.
+
+<img src="docs/qr-cia-fbi.png" alt="QR code para instalar o .cia pelo FBI" width="220">
+
 ### Opção B: `.3dsx` (Homebrew Launcher)
 1. Baixe `PokemonStadium2-3DS.3dsx`.
 2. Copie para `sdmc:/3ds/`.
