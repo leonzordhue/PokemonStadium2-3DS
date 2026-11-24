@@ -131,11 +131,36 @@ Os botões podem ser trocados no menu do SELECT.
 
 ## Perguntas frequentes
 
-#### Posso usar outra ROM (europeia, japonesa, hack)?
-**Não.** Este projeto é um port de **uma** versão específica: o Pokémon Stadium 2 americano. Ele não é um emulador e não roda outras ROMs.
+#### Instalar só o `.cia` já funciona?
+**Não.** O `.cia` (ou o `.3dsx`) é só o programa. O jogo em si vem da **sua** ROM do Pokémon Stadium 2, que precisa estar em `sdmc:/3ds/PokemonStadium2/stadium2.z64`. Sem ela, o port avisa que não achou a ROM.
 
-#### O jogo fecha ou mostra erro ao abrir.
-Confira o nome (`stadium2.z64`), a pasta (`sdmc:/3ds/PokemonStadium2/`) e o SHA-1 da ROM. A causa mais comum é ROM em `.v64`/`.n64` ou de outra região.
+#### Qual ROM eu preciso? Tem que renomear?
+A do **Pokémon Stadium 2 americano (EUA, código `NP3E`)**, em `.z64`, com o SHA-1 `d8343e69a7dc63b869cf6361d87cde64444281d3`. Sim, renomeie para **`stadium2.z64`** (tudo minúsculo) e coloque em `sdmc:/3ds/PokemonStadium2/`.
+
+#### Baixei/gerei a ROM e não funciona. O que pode ser?
+Na ordem mais comum:
+1. **Região errada:** europeia (inclui a versão em espanhol), japonesa ou hack não servem.
+2. **Formato trocado:** `.v64` ou `.n64` não serve só renomeando para `.z64`; converta com o *Tool64*.
+3. **Nome ou pasta:** tem que ser exatamente `sdmc:/3ds/PokemonStadium2/stadium2.z64` (cuidado com o Windows escondendo a extensão e o arquivo virar `stadium2.z64.z64`).
+4. **ROM modificada ou incompleta:** confira o SHA-1 acima (`Get-FileHash stadium2.z64 -Algorithm SHA1` no PowerShell). Se não bater, a ROM não é a certa.
+
+#### Funciona com a ROM em espanhol (ou francês, alemão, italiano, japonês)?
+**Não.** Essas são outras versões do jogo, com outro código. O port foi recompilado a partir da versão americana e só roda ela.
+
+#### Ele lê o meu save do Pokémon do Virtual Console do 3DS?
+**Sim.** Se o Pokémon Red, Blue, Yellow, Gold, Silver ou Crystal do eShop estiver instalado no console, o Transfer Pak usa o save dele direto, sem exportar nada. Você só precisa colocar a ROM de Game Boy do mesmo jogo em `sdmc:/3ds/PokemonStadium2/gb/` (qualquer nome, sem `.sav`). Para escolher à mão, use `p1_save=vc` no `transferpak.cfg` (veja [Transfer Pak](#transfer-pak-pokémon-do-game-boy)).
+
+#### E o save do cartucho de Game Boy ou de um emulador?
+Funciona. Coloque a ROM (`.gb`/`.gbc`) e o `.sav` com o **mesmo nome** em `gb/`, por exemplo `Pokemon Crystal.gbc` + `Pokemon Crystal.sav`. O port trabalha numa cópia em `gb/saves/`; o seu `.sav` original não é alterado.
+
+#### Para o Transfer Pak e a GB Tower eu preciso das ROMs de Game Boy?
+**Sim**, das ROMs dos jogos que você quer usar: Pokémon **Red, Blue, Yellow, Gold, Silver ou Crystal** (só um já basta). O Stadium 2 do N64 também exigia o cartucho no Transfer Pak. Sem nenhuma ROM de Game Boy, o resto do jogo funciona normalmente (batalhas com os Pokémon de aluguel, minigames etc.); só o Transfer Pak, a GB Tower e as funções que usam os seus Pokémon ficam indisponíveis.
+
+#### Preciso renomear as ROMs de Game Boy?
+**Não.** Pode ser qualquer nome. A única regra é: quando usar `.sav`, ele tem que ter o mesmo nome da ROM (só muda a extensão). Use as versões em inglês (EUA/Europa); outras línguas não foram testadas.
+
+#### Os Pokémon que eu levar para o Stadium 2 voltam para o meu save?
+Sim, como no N64: o que o Stadium 2 grava no cartucho (por exemplo, Pokémon trocados no PC do Laboratório) vai para o save em uso (a cópia em `gb/saves/` ou o save do Virtual Console). O port guarda cópias de segurança sozinho em `gb/backup/` (a original, da primeira vez, e a do início de cada sessão), mas vale fazer o seu backup também.
 
 #### Funciona no Citra / Azahar?
 Funciona no [Azahar](https://azahar-emu.org/) (mais lento que no console). Coloque a ROM em `sdmc/3ds/PokemonStadium2/` dentro da pasta de usuário do emulador.
